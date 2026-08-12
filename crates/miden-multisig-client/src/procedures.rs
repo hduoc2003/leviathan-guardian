@@ -23,25 +23,25 @@ impl ProcedureName {
     pub fn root(&self) -> Word {
         match self {
             ProcedureName::UpdateSigners => procedure_root_word(
-                "0x34963b067dbba634e57b416bc2f2a9a8d4ac24147f40b2900148c9ba44774274",
+                "0x3d382ad461f9914c487c6fe908991d088eb54ecbd4aa8560ef79c66c3746bf19",
             ),
             ProcedureName::UpdateProcedureThreshold => procedure_root_word(
-                "0xec74c4b96ce593c11017ae54dec9c0ae5e0d242e8b3074eb3908d961300aed67",
+                "0x1f43e9d56ceff5d547ffdcb89896fb38cae0be1b74d9235ed2b4aa525df85f8d",
             ),
             ProcedureName::AuthTx => procedure_root_word(
-                "0x0708020dce7b91b61116e3eb27e5d686e129a83df3c540e0a7693b4523814e72",
+                "0x58156720b5dba3490a008a733e9f414363b4fb367bfdf36c324f3c2867372484",
             ),
             ProcedureName::UpdateGuardian => procedure_root_word(
-                "0xeceb1f2c2d7d20312dbaf091e9a27a2b63f9fcba120948043069793a5715bc96",
+                "0xc8ea876f1837e5cd1d6031becdbd40ce262ecd55930d65400f6890a37149d80c",
             ),
             ProcedureName::VerifyGuardian => procedure_root_word(
-                "0xe6a8a62d37117f55a79b5345aa3d263ab16e973d486bac9a1612663dfdecf82d",
+                "0x9bc6e7b25c8dbaa29d6ad41e354a545dd0a4bac7f3a521bb5195ba101f0213cc",
             ),
             ProcedureName::SendAsset => procedure_root_word(
-                "0xfb1c73d10de1954e9e8948964e3e77cf4e33759d2e012cb00eb10c50f2974eb4",
+                "0x6d30df4312a2c44ec842db1bee227cc045396ca91e2c47d756dcb607f2bf5f89",
             ),
             ProcedureName::ReceiveAsset => procedure_root_word(
-                "0x6170fd6d682d91777b551fd866258f43cc657f1291f8f071500f4e56e9c153da",
+                "0x75f638c65584d058542bcf4674b066ae394183021bc9b44dc2fdd97d52f9bcfb",
             ),
         }
     }
@@ -139,10 +139,10 @@ mod tests {
 
         let commit = |s: u64| {
             Word::from([
-                Felt::new_unchecked(s),
-                Felt::new_unchecked(s + 1),
-                Felt::new_unchecked(s + 2),
-                Felt::new_unchecked(s + 3),
+                Felt::new(s),
+                Felt::new(s + 1),
+                Felt::new(s + 2),
+                Felt::new(s + 3),
             ])
         };
         let config = MultisigGuardianConfig::new(1, vec![commit(1)], commit(10));

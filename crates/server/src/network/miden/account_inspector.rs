@@ -126,8 +126,8 @@ mod tests {
     use super::*;
     use guardian_shared::FromJson;
     use miden_protocol::account::{
-        AccountCode, AccountId, AccountIdVersion, AccountStorage, AccountType, StorageMap,
-        StorageMapKey, StorageSlot, StorageSlotName,
+        AccountCode, AccountId, AccountIdVersion, AccountStorage, AccountStorageMode, AccountType,
+        StorageMap, StorageMapKey, StorageSlot, StorageSlotName,
     };
     use miden_protocol::asset::AssetVault;
 
@@ -157,15 +157,19 @@ mod tests {
             signer_slot(OZ_MULTISIG_SIGNER_PUBKEYS, oz_pubkeys),
         ])
         .expect("valid storage");
-        let account_id =
-            AccountId::dummy([3u8; 15], AccountIdVersion::Version1, AccountType::Private);
+        let account_id = AccountId::dummy(
+            [3u8; 15],
+            AccountIdVersion::Version0,
+            AccountType::RegularAccountUpdatableCode,
+            AccountStorageMode::Private,
+        );
 
         Account::new_existing(
             account_id,
             AssetVault::new(&[]).expect("empty vault"),
             storage,
             AccountCode::mock(),
-            miden_protocol::Felt::new_unchecked(1),
+            miden_protocol::Felt::new(1),
         )
     }
 

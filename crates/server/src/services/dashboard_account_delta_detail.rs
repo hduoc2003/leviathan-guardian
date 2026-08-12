@@ -258,7 +258,7 @@ mod tests {
     use axum::http::StatusCode;
     use std::sync::Arc;
 
-    const TEST_ACCOUNT_ID: &str = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+    const TEST_ACCOUNT_ID: &str = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
 
     fn falcon_metadata() -> AccountMetadata {
         AccountMetadata {

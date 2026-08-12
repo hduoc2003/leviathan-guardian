@@ -67,13 +67,11 @@ mod tests {
         MultisigGuardianBuilder, MultisigGuardianConfig,
     };
     use miden_protocol::account::auth::AuthScheme;
-    use miden_protocol::account::{AccountId, AccountType};
-    use miden_protocol::asset::{AssetAmount, TokenSymbol};
+    use miden_protocol::account::{AccountId, AccountStorageMode};
+    use miden_protocol::asset::TokenSymbol;
     use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
     use miden_standards::AuthMethod;
-    use miden_standards::account::access::AccessControl;
-    use miden_standards::account::faucets::{FungibleFaucet, TokenName, create_fungible_faucet};
-    use miden_standards::account::policies::TokenPolicyManager;
+    use miden_standards::account::faucets::create_basic_fungible_faucet;
 
     #[test]
     fn build_p2id_transaction_request_uses_custom_send_script() {
@@ -86,28 +84,21 @@ mod tests {
         ))
         .build()
         .unwrap();
-        let faucet_definition = FungibleFaucet::builder()
-            .name(TokenName::new("test token").unwrap())
-            .symbol(TokenSymbol::try_from("TST").unwrap())
-            .decimals(8)
-            .max_supply(AssetAmount::from(1_000_000u32))
-            .build()
-            .unwrap();
-        let faucet = create_fungible_faucet(
+        let faucet = create_basic_fungible_faucet(
             [5u8; 32],
-            faucet_definition,
-            AccountType::Public,
+            TokenSymbol::try_from("TST").unwrap(),
+            8,
+            Felt::new(1_000_000),
+            AccountStorageMode::Public,
             AuthMethod::SingleSig {
                 approver: (
                     secret_key.public_key().to_commitment().into(),
                     AuthScheme::Falcon512Poseidon2,
                 ),
             },
-            AccessControl::AuthControlled,
-            TokenPolicyManager::new(),
         )
         .unwrap();
-        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
         let asset = miden_protocol::asset::FungibleAsset::new(faucet.id(), 100)
             .unwrap()
             .into();
@@ -140,28 +131,21 @@ mod tests {
         ))
         .build()
         .unwrap();
-        let faucet_definition = FungibleFaucet::builder()
-            .name(TokenName::new("test token").unwrap())
-            .symbol(TokenSymbol::try_from("TST").unwrap())
-            .decimals(8)
-            .max_supply(AssetAmount::from(1_000_000u32))
-            .build()
-            .unwrap();
-        let faucet = create_fungible_faucet(
+        let faucet = create_basic_fungible_faucet(
             [5u8; 32],
-            faucet_definition,
-            AccountType::Public,
+            TokenSymbol::try_from("TST").unwrap(),
+            8,
+            Felt::new(1_000_000),
+            AccountStorageMode::Public,
             AuthMethod::SingleSig {
                 approver: (
                     secret_key.public_key().to_commitment().into(),
                     AuthScheme::Falcon512Poseidon2,
                 ),
             },
-            AccessControl::AuthControlled,
-            TokenPolicyManager::new(),
         )
         .unwrap();
-        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
         let salt = Word::from([1u32, 2, 3, 4]);
         let build = |note_type: NoteType| {
             let asset: Asset = miden_protocol::asset::FungibleAsset::new(faucet.id(), 100)

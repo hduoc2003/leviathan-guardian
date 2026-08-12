@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use miden_protocol::{
     CoreLibrary, ProtocolLib,
-    account::{AccountComponent, AccountComponentMetadata, StorageSlot},
+    account::{AccountComponent, AccountComponentMetadata, AccountType, StorageSlot},
     assembly::{
         Assembler, DefaultSourceManager, Library, Module, ModuleKind, Path as LibraryPath,
         SourceManager,
@@ -74,7 +74,13 @@ fn compile_component(path: &Path, slots: Vec<StorageSlot>) -> Result<AccountComp
     let asm = build_component_assembler()?;
     let code = fs::read_to_string(path).map_err(|e| anyhow!("failed to read {path:?}: {e}"))?;
     let library = compile_to_library(&code, &asm)?;
-    let metadata = AccountComponentMetadata::new(openzeppelin_library_path(path, &masm_root())?);
+    let metadata = AccountComponentMetadata::new(
+        openzeppelin_library_path(path, &masm_root())?,
+        [
+            AccountType::RegularAccountUpdatableCode,
+            AccountType::RegularAccountImmutableCode,
+        ],
+    );
     let component = AccountComponent::new(library, slots, metadata)
         .map_err(|e| anyhow!("failed to create component: {e}"))?;
 
@@ -136,7 +142,7 @@ fn build_openzeppelin_library() -> Result<Library> {
         .assemble_library(modules)
         .map_err(|e| anyhow!("failed to assemble openzeppelin library: {e:?}"))?;
 
-    Ok((*library).clone())
+    Ok(library)
 }
 
 // Builds the assembler with the openzeppelin library and miden-standards library linked.
@@ -157,7 +163,7 @@ fn compile_to_library(code: &str, assembler: &Assembler) -> Result<Library> {
         .clone()
         .assemble_library([code])
         .map_err(|e| anyhow!("failed to assemble library: {e}"))?;
-    Ok((*library).clone())
+    Ok(library)
 }
 
 // ============================================================================
@@ -228,7 +234,7 @@ pub fn create_library(
         source_manager,
     )?;
     let library = assembler.clone().assemble_library([module])?;
-    Ok((*library).clone())
+    Ok(library)
 }
 
 /// Builds the OpenZeppelin library for use in transaction scripts.
@@ -259,7 +265,7 @@ pub fn get_multisig_library() -> Result<Library> {
         .assemble_library([module])
         .map_err(|e| anyhow!("failed to assemble multisig library: {e}"))?;
 
-    Ok((*library).clone())
+    Ok(library)
 }
 
 /// Builds an ECDSA multisig library for use in transaction scripts.
@@ -283,7 +289,7 @@ pub fn get_multisig_ecdsa_library() -> Result<Library> {
         .assemble_library([module])
         .map_err(|e| anyhow!("failed to assemble multisig ecdsa library: {e}"))?;
 
-    Ok((*library).clone())
+    Ok(library)
 }
 
 /// Builds a library for GUARDIAN procedures for use in transaction scripts.
@@ -308,5 +314,5 @@ pub fn get_guardian_library() -> Result<Library> {
         .assemble_library([module])
         .map_err(|e| anyhow!("failed to assemble GUARDIAN library: {e}"))?;
 
-    Ok((*library).clone())
+    Ok(library)
 }

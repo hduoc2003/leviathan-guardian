@@ -64,11 +64,45 @@ chrono = "0.4"
 # parameter inference for axum `Query`/`Path` extractors.
 utoipa = { version = "5", features = ["axum_extras"] }
 
-# Miden
-miden-protocol = "0.15.3"
-miden-standards = "0.15.3"
-miden-tx = "0.15.3"
-miden-node-proto ="0.15.0"
-miden-testing = "0.15.3"
-miden-client = "0.15.0"
-miden-client-sqlite-store = "0.15.0"
+# Miden. Requirements stay at the `0.15` minor because the Leviathan forks
+# patched in below are versioned 0.15.0; a `0.15.3` floor would reject them.
+miden-protocol = "0.15"
+miden-standards = "0.15"
+miden-tx = "0.15"
+miden-node-proto ="0.15"
+miden-testing = "0.15"
+miden-client = "0.15"
+miden-client-sqlite-store = "0.15"
+
+# Leviathan (Miden fork) sources. protocol and node match what the live testnet
+# node runs; miden-client matches the WASM SDK the TypeScript package resolves,
+# so both SDKs derive the same account IDs and note serials. Bumping any of
+# these alone re-splits them - see `.claude/FORK.md`.
+[patch.crates-io]
+miden-crypto          = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
+miden-crypto-derive   = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
+miden-field           = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
+miden-serde-utils     = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
+miden-air             = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-assembly        = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-assembly-syntax = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-core            = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-core-lib        = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-debug-types     = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-mast-package    = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-processor       = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-prover          = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-utils-sync      = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-verifier        = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
+miden-block-prover    = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
+miden-protocol        = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
+miden-protocol-macros = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
+miden-standards       = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
+miden-testing         = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
+miden-tx              = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
+miden-node-proto           = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
+miden-node-proto-build     = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
+miden-node-utils           = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
+miden-remote-prover-client = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
+miden-client              = { git = "https://git.softly.com/leviathan/miden-client", rev = "a22c25071920250ca3731a7b2f77e7cf902d35b2" }
+miden-client-sqlite-store = { git = "https://git.softly.com/leviathan/miden-client", rev = "a22c25071920250ca3731a7b2f77e7cf902d35b2" }

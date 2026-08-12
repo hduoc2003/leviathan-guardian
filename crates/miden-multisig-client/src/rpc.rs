@@ -10,23 +10,25 @@ use guardian_shared::retry::{
 use miden_client::note_transport::{
     NoteInfo, NoteStream, NoteTransportClient, NoteTransportCursor, NoteTransportError,
 };
-use miden_client::rpc::domain::account::{AccountProof, GetAccountRequest};
+use miden_client::rpc::domain::account::{
+    AccountProof, AccountStorageRequirements, FetchedAccount,
+};
 use miden_client::rpc::domain::account_vault::AccountVaultInfo;
 use miden_client::rpc::domain::limits::RpcLimits;
-use miden_client::rpc::domain::note::{FetchedNote, NoteSyncBlock};
+use miden_client::rpc::domain::note::{FetchedNote, NoteSyncInfo};
 use miden_client::rpc::domain::nullifier::NullifierUpdate;
 use miden_client::rpc::domain::storage_map::StorageMapInfo;
-use miden_client::rpc::domain::sync::{ChainMmrInfo, SyncTarget};
-use miden_client::rpc::domain::transaction::TransactionRecord;
-use miden_client::rpc::{GrpcError, NetworkNoteStatusInfo, NodeRpcClient, RpcError, RpcStatusInfo};
+use miden_client::rpc::domain::sync::ChainMmrInfo;
+use miden_client::rpc::domain::transaction::TransactionsInfo;
+use miden_client::rpc::{AccountStateAt, GrpcError, NodeRpcClient, RpcError, RpcStatusInfo};
 use miden_protocol::Word;
-use miden_protocol::account::AccountId;
+use miden_protocol::account::{AccountCode, AccountId};
 use miden_protocol::address::NetworkId;
-use miden_protocol::batch::{ProposedBatch, ProvenBatch};
 use miden_protocol::block::{BlockHeader, BlockNumber, ProvenBlock};
 use miden_protocol::crypto::merkle::mmr::MmrProof;
+use miden_protocol::crypto::merkle::smt::SmtProof;
 use miden_protocol::note::NoteHeader;
-use miden_protocol::note::{NoteId, NoteScript, NoteTag};
+use miden_protocol::note::{NoteId, NoteScript, NoteTag, Nullifier};
 use miden_protocol::transaction::{ProvenTransaction, TransactionInputs};
 
 use crate::error::{MultisigError, Result, rpc_kind};
@@ -169,11 +171,9 @@ fn note_transport_link_evidence(cause: &(dyn Error + 'static)) -> StructuredEvid
                 StructuredEvidence::Transient
             }
         }
-        Some(
-            NoteTransportError::Disabled
-            | NoteTransportError::Deserialization(_)
-            | NoteTransportError::PaginationDidNotTerminate(_),
-        ) => StructuredEvidence::Permanent,
+        Some(NoteTransportError::Disabled | NoteTransportError::Deserialization(_)) => {
+            StructuredEvidence::Permanent
+        }
         Some(NoteTransportError::Network(_)) | None => StructuredEvidence::Indeterminate,
     }
 }
@@ -251,19 +251,6 @@ impl NodeRpcClient for RetryingNodeRpcClient {
             .await
     }
 
-    /// Never retried, regardless of the policy: re-sending a submission whose
-    /// outcome is unknown could execute it twice.
-    async fn submit_proven_batch(
-        &self,
-        proven_batch: ProvenBatch,
-        proposed_batch: ProposedBatch,
-        transaction_inputs: Vec<TransactionInputs>,
-    ) -> std::result::Result<BlockNumber, RpcError> {
-        self.inner
-            .submit_proven_batch(proven_batch, proposed_batch, transaction_inputs)
-            .await
-    }
-
     async fn get_block_header_by_number(
         &self,
         block_num: Option<BlockNumber>,
@@ -279,9 +266,8 @@ impl NodeRpcClient for RetryingNodeRpcClient {
     async fn get_block_by_number(
         &self,
         block_num: BlockNumber,
-        include_proof: bool,
     ) -> std::result::Result<ProvenBlock, RpcError> {
-        self.execute(|| self.inner.get_block_by_number(block_num, include_proof))
+        self.execute(|| self.inner.get_block_by_number(block_num))
             .await
     }
 
@@ -294,19 +280,19 @@ impl NodeRpcClient for RetryingNodeRpcClient {
 
     async fn sync_chain_mmr(
         &self,
-        current_block_height: BlockNumber,
-        upper_bound: SyncTarget,
+        block_from: BlockNumber,
+        block_to: Option<BlockNumber>,
     ) -> std::result::Result<ChainMmrInfo, RpcError> {
-        self.execute(|| self.inner.sync_chain_mmr(current_block_height, upper_bound))
+        self.execute(|| self.inner.sync_chain_mmr(block_from, block_to))
             .await
     }
 
     async fn sync_notes(
         &self,
         block_from: BlockNumber,
-        block_to: BlockNumber,
+        block_to: Option<BlockNumber>,
         note_tags: &BTreeSet<NoteTag>,
-    ) -> std::result::Result<Vec<NoteSyncBlock>, RpcError> {
+    ) -> std::result::Result<NoteSyncInfo, RpcError> {
         self.execute(|| self.inner.sync_notes(block_from, block_to, note_tags))
             .await
     }
@@ -315,25 +301,56 @@ impl NodeRpcClient for RetryingNodeRpcClient {
         &self,
         prefix: &[u16],
         block_from: BlockNumber,
-        block_to: BlockNumber,
+        block_to: Option<BlockNumber>,
     ) -> std::result::Result<Vec<NullifierUpdate>, RpcError> {
         self.execute(|| self.inner.sync_nullifiers(prefix, block_from, block_to))
             .await
     }
 
-    async fn get_account(
+    async fn get_account_details(
         &self,
         account_id: AccountId,
-        request: GetAccountRequest,
-    ) -> std::result::Result<(BlockNumber, AccountProof), RpcError> {
-        self.execute(|| self.inner.get_account(account_id, request.clone()))
+    ) -> std::result::Result<FetchedAccount, RpcError> {
+        self.execute(|| self.inner.get_account_details(account_id))
             .await
+    }
+
+    async fn check_nullifiers(
+        &self,
+        nullifiers: &[Nullifier],
+    ) -> std::result::Result<Vec<SmtProof>, RpcError> {
+        self.execute(|| self.inner.check_nullifiers(nullifiers))
+            .await
+    }
+
+    async fn get_account_proof(
+        &self,
+        account_id: AccountId,
+        storage_requirements: AccountStorageRequirements,
+        account_state: AccountStateAt,
+        known_account_code: Option<AccountCode>,
+        known_vault_commitment: Option<Word>,
+    ) -> std::result::Result<(BlockNumber, AccountProof), RpcError> {
+        let account_state = move || match &account_state {
+            AccountStateAt::ChainTip => AccountStateAt::ChainTip,
+            AccountStateAt::Block(block) => AccountStateAt::Block(*block),
+        };
+        self.execute(|| {
+            self.inner.get_account_proof(
+                account_id,
+                storage_requirements.clone(),
+                account_state(),
+                known_account_code.clone(),
+                known_vault_commitment,
+            )
+        })
+        .await
     }
 
     async fn get_note_script_by_root(
         &self,
         root: Word,
-    ) -> std::result::Result<Option<NoteScript>, RpcError> {
+    ) -> std::result::Result<NoteScript, RpcError> {
         self.execute(|| self.inner.get_note_script_by_root(root))
             .await
     }
@@ -341,7 +358,7 @@ impl NodeRpcClient for RetryingNodeRpcClient {
     async fn sync_storage_maps(
         &self,
         block_from: BlockNumber,
-        block_to: BlockNumber,
+        block_to: Option<BlockNumber>,
         account_id: AccountId,
     ) -> std::result::Result<StorageMapInfo, RpcError> {
         self.execute(|| {
@@ -354,7 +371,7 @@ impl NodeRpcClient for RetryingNodeRpcClient {
     async fn sync_account_vault(
         &self,
         block_from: BlockNumber,
-        block_to: BlockNumber,
+        block_to: Option<BlockNumber>,
         account_id: AccountId,
     ) -> std::result::Result<AccountVaultInfo, RpcError> {
         self.execute(|| {
@@ -367,9 +384,9 @@ impl NodeRpcClient for RetryingNodeRpcClient {
     async fn sync_transactions(
         &self,
         block_from: BlockNumber,
-        block_to: BlockNumber,
+        block_to: Option<BlockNumber>,
         account_ids: Vec<AccountId>,
-    ) -> std::result::Result<Vec<TransactionRecord>, RpcError> {
+    ) -> std::result::Result<TransactionsInfo, RpcError> {
         self.execute(|| {
             self.inner
                 .sync_transactions(block_from, block_to, account_ids.clone())
@@ -395,14 +412,6 @@ impl NodeRpcClient for RetryingNodeRpcClient {
 
     async fn get_status_unversioned(&self) -> std::result::Result<RpcStatusInfo, RpcError> {
         self.execute(|| self.inner.get_status_unversioned()).await
-    }
-
-    async fn get_network_note_status(
-        &self,
-        note_id: NoteId,
-    ) -> std::result::Result<NetworkNoteStatusInfo, RpcError> {
-        self.execute(|| self.inner.get_network_note_status(note_id))
-            .await
     }
 }
 
@@ -711,14 +720,6 @@ mod tests {
         ) -> std::result::Result<BlockNumber, RpcError> {
             unimplemented!()
         }
-        async fn submit_proven_batch(
-            &self,
-            _: ProvenBatch,
-            _: ProposedBatch,
-            _: Vec<TransactionInputs>,
-        ) -> std::result::Result<BlockNumber, RpcError> {
-            unimplemented!()
-        }
         async fn get_block_header_by_number(
             &self,
             _: Option<BlockNumber>,
@@ -729,7 +730,6 @@ mod tests {
         async fn get_block_by_number(
             &self,
             _: BlockNumber,
-            _: bool,
         ) -> std::result::Result<ProvenBlock, RpcError> {
             unimplemented!()
         }
@@ -742,43 +742,58 @@ mod tests {
         async fn sync_chain_mmr(
             &self,
             _: BlockNumber,
-            _: SyncTarget,
+            _: Option<BlockNumber>,
         ) -> std::result::Result<ChainMmrInfo, RpcError> {
             unimplemented!()
         }
         async fn sync_notes(
             &self,
             _: BlockNumber,
-            _: BlockNumber,
+            _: Option<BlockNumber>,
             _: &BTreeSet<NoteTag>,
-        ) -> std::result::Result<Vec<NoteSyncBlock>, RpcError> {
+        ) -> std::result::Result<NoteSyncInfo, RpcError> {
             unimplemented!()
         }
         async fn sync_nullifiers(
             &self,
             _: &[u16],
             _: BlockNumber,
-            _: BlockNumber,
+            _: Option<BlockNumber>,
         ) -> std::result::Result<Vec<NullifierUpdate>, RpcError> {
             unimplemented!()
         }
-        async fn get_account(
+        async fn check_nullifiers(
+            &self,
+            _: &[Nullifier],
+        ) -> std::result::Result<Vec<SmtProof>, RpcError> {
+            unimplemented!()
+        }
+        async fn get_account_details(
             &self,
             _: AccountId,
-            _: GetAccountRequest,
+        ) -> std::result::Result<FetchedAccount, RpcError> {
+            unimplemented!()
+        }
+        async fn get_account_proof(
+            &self,
+            _: AccountId,
+            _: AccountStorageRequirements,
+            _: AccountStateAt,
+            _: Option<AccountCode>,
+            _: Option<Word>,
         ) -> std::result::Result<(BlockNumber, AccountProof), RpcError> {
             unimplemented!()
         }
         async fn get_note_script_by_root(
             &self,
             _: Word,
-        ) -> std::result::Result<Option<NoteScript>, RpcError> {
+        ) -> std::result::Result<NoteScript, RpcError> {
             unimplemented!()
         }
         async fn sync_storage_maps(
             &self,
             _: BlockNumber,
-            _: BlockNumber,
+            _: Option<BlockNumber>,
             _: AccountId,
         ) -> std::result::Result<StorageMapInfo, RpcError> {
             unimplemented!()
@@ -786,7 +801,7 @@ mod tests {
         async fn sync_account_vault(
             &self,
             _: BlockNumber,
-            _: BlockNumber,
+            _: Option<BlockNumber>,
             _: AccountId,
         ) -> std::result::Result<AccountVaultInfo, RpcError> {
             unimplemented!()
@@ -794,21 +809,15 @@ mod tests {
         async fn sync_transactions(
             &self,
             _: BlockNumber,
-            _: BlockNumber,
+            _: Option<BlockNumber>,
             _: Vec<AccountId>,
-        ) -> std::result::Result<Vec<TransactionRecord>, RpcError> {
+        ) -> std::result::Result<TransactionsInfo, RpcError> {
             unimplemented!()
         }
         async fn get_rpc_limits(&self) -> std::result::Result<RpcLimits, RpcError> {
             unimplemented!()
         }
         async fn get_status_unversioned(&self) -> std::result::Result<RpcStatusInfo, RpcError> {
-            unimplemented!()
-        }
-        async fn get_network_note_status(
-            &self,
-            _: NoteId,
-        ) -> std::result::Result<NetworkNoteStatusInfo, RpcError> {
             unimplemented!()
         }
     }
@@ -998,19 +1007,13 @@ mod tests {
     }
 
     fn test_note_header() -> NoteHeader {
-        let sender = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let sender = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
         let metadata = miden_protocol::note::NoteMetadata::new(
-            miden_protocol::note::PartialNoteMetadata::new(
-                sender,
-                miden_protocol::note::NoteType::Private,
-            ),
-            &miden_protocol::note::NoteAttachments::default(),
+            sender,
+            miden_protocol::note::NoteType::Private,
         );
         NoteHeader::new(
-            miden_protocol::note::NoteDetailsCommitment::from_raw_commitments(
-                Word::default(),
-                Word::default(),
-            ),
+            miden_protocol::note::NoteId::new(Word::default(), Word::default()),
             metadata,
         )
     }
@@ -1036,9 +1039,6 @@ mod tests {
         ));
         assert!(!is_transient_note_transport_error(
             &NoteTransportError::Network("note not recognized by relay".to_string())
-        ));
-        assert!(!is_transient_note_transport_error(
-            &NoteTransportError::PaginationDidNotTerminate(64)
         ));
     }
 

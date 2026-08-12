@@ -112,13 +112,17 @@ mod tests {
 
     #[test]
     fn test_falcon_sign_and_verify_account_id_with_timestamp() {
-        use miden_protocol::account::{AccountIdVersion, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
 
-        let account_id =
-            AccountId::dummy([0u8; 15], AccountIdVersion::Version1, AccountType::Private);
+        let account_id = AccountId::dummy(
+            [0u8; 15],
+            AccountIdVersion::Version0,
+            AccountType::RegularAccountUpdatableCode,
+            AccountStorageMode::Private,
+        );
         let account_id_hex = account_id.to_hex();
         let timestamp: i64 = 1700000000; // Fixed timestamp for testing
 
@@ -151,14 +155,18 @@ mod tests {
 
     #[test]
     fn test_falcon_verify_with_wrong_pubkey() {
-        use miden_protocol::account::{AccountIdVersion, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
 
         let secret_key1 = SecretKey::new();
         let secret_key2 = SecretKey::new();
         let public_key2 = secret_key2.public_key();
 
-        let account_id =
-            AccountId::dummy([1u8; 15], AccountIdVersion::Version1, AccountType::Private);
+        let account_id = AccountId::dummy(
+            [1u8; 15],
+            AccountIdVersion::Version0,
+            AccountType::RegularAccountUpdatableCode,
+            AccountStorageMode::Private,
+        );
         let account_id_hex = account_id.to_hex();
         let timestamp: i64 = 1700000000;
 
@@ -190,15 +198,23 @@ mod tests {
 
     #[test]
     fn test_falcon_verify_with_wrong_message() {
-        use miden_protocol::account::{AccountIdVersion, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
 
-        let account_id1 =
-            AccountId::dummy([2u8; 15], AccountIdVersion::Version1, AccountType::Private);
-        let account_id2 =
-            AccountId::dummy([3u8; 15], AccountIdVersion::Version1, AccountType::Private);
+        let account_id1 = AccountId::dummy(
+            [2u8; 15],
+            AccountIdVersion::Version0,
+            AccountType::RegularAccountUpdatableCode,
+            AccountStorageMode::Private,
+        );
+        let account_id2 = AccountId::dummy(
+            [3u8; 15],
+            AccountIdVersion::Version0,
+            AccountType::RegularAccountUpdatableCode,
+            AccountStorageMode::Private,
+        );
         let account_id1_hex = account_id1.to_hex();
         let account_id2_hex = account_id2.to_hex();
         let timestamp: i64 = 1700000000;
@@ -231,13 +247,17 @@ mod tests {
 
     #[test]
     fn test_falcon_verify_with_wrong_timestamp() {
-        use miden_protocol::account::{AccountIdVersion, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
 
-        let account_id =
-            AccountId::dummy([4u8; 15], AccountIdVersion::Version1, AccountType::Private);
+        let account_id = AccountId::dummy(
+            [4u8; 15],
+            AccountIdVersion::Version0,
+            AccountType::RegularAccountUpdatableCode,
+            AccountStorageMode::Private,
+        );
         let account_id_hex = account_id.to_hex();
         let timestamp1: i64 = 1700000000;
         let timestamp2: i64 = 1700000001; // Different timestamp
@@ -267,13 +287,17 @@ mod tests {
 
     #[test]
     fn test_falcon_verify_with_wrong_payload() {
-        use miden_protocol::account::{AccountIdVersion, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
 
-        let account_id =
-            AccountId::dummy([5u8; 15], AccountIdVersion::Version1, AccountType::Private);
+        let account_id = AccountId::dummy(
+            [5u8; 15],
+            AccountIdVersion::Version0,
+            AccountType::RegularAccountUpdatableCode,
+            AccountStorageMode::Private,
+        );
         let account_id_hex = account_id.to_hex();
         let timestamp: i64 = 1700000000;
 

@@ -87,18 +87,13 @@ fn build_account(cosigners: usize, executed_txs: usize) -> Account {
 }
 
 fn seed_replay_entry(account: &mut Account, slot: &StorageSlotName, i: u64) {
-    let key = MidenWord::from([
-        Felt::new_unchecked(i),
-        Felt::new_unchecked(0x5eed),
-        ZERO,
-        ZERO,
-    ]);
+    let key = MidenWord::from([Felt::new(i), Felt::new(0x5eed), ZERO, ZERO]);
     account
         .storage_mut()
         .set_map_item(
             slot,
             StorageMapKey::new(key),
-            MidenWord::from([Felt::new_unchecked(1), ZERO, ZERO, ZERO]),
+            MidenWord::from([Felt::new(1), ZERO, ZERO, ZERO]),
         )
         .expect("seed replay-map entry");
 }
@@ -111,8 +106,8 @@ fn build_partial_delta(account: &Account, entries: usize) -> serde_json::Value {
     let mut storage_delta = AccountStorageDelta::default();
     for i in 0..entries.max(1) {
         let key = MidenWord::from([
-            Felt::new_unchecked(0xdead_0000 + i as u64),
-            Felt::new_unchecked(0xbeef),
+            Felt::new(0xdead_0000 + i as u64),
+            Felt::new(0xbeef),
             ZERO,
             ZERO,
         ]);
@@ -120,7 +115,7 @@ fn build_partial_delta(account: &Account, entries: usize) -> serde_json::Value {
             .set_map_item(
                 executed_txs_name.clone(),
                 StorageMapKey::new(key),
-                MidenWord::from([Felt::new_unchecked(1), ZERO, ZERO, ZERO]),
+                MidenWord::from([Felt::new(1), ZERO, ZERO, ZERO]),
             )
             .expect("set delta replay entry");
     }
@@ -129,7 +124,7 @@ fn build_partial_delta(account: &Account, entries: usize) -> serde_json::Value {
         account.id(),
         storage_delta,
         AccountVaultDelta::default(),
-        Felt::new_unchecked(1),
+        Felt::new(1),
     )
     .expect("build account delta");
 
@@ -144,7 +139,7 @@ fn build_full_state_delta(account: &Account) -> serde_json::Value {
         account.id(),
         AccountStorageDelta::default(),
         AccountVaultDelta::default(),
-        Felt::new_unchecked(1),
+        Felt::new(1),
     )
     .expect("build account delta")
     .with_code(Some(account.code().clone()));

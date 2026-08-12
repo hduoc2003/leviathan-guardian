@@ -276,7 +276,7 @@ mod tests {
     use miden_protocol::{
         account::auth::{AuthScheme, Signature as AccountSignature},
         account::{AccountBuilder, auth::PublicKeyCommitment},
-        crypto::dsa::ecdsa_k256_keccak::SigningKey as EcdsaSecretKey,
+        crypto::dsa::ecdsa_k256_keccak::SecretKey as EcdsaSecretKey,
         crypto::dsa::falcon512_poseidon2::SecretKey,
     };
     use miden_standards::account::{auth::AuthSingleSig, wallets::BasicWallet};

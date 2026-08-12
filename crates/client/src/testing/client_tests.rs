@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tonic::Status;
 
 fn create_test_account_id() -> AccountId {
-    AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap()
+    AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap()
 }
 
 fn create_test_signer() -> Arc<dyn Signer> {
@@ -517,7 +517,7 @@ async fn test_lookup_account_by_key_commitment_single_match() {
     let service = MockGuardianService::default().with_get_account_by_key_commitment(Ok(
         GetAccountByKeyCommitmentResponse {
             accounts: vec![AccountRef {
-                account_id: "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string(),
+                account_id: "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string(),
             }],
         },
     ));
@@ -536,7 +536,7 @@ async fn test_lookup_account_by_key_commitment_single_match() {
     assert_eq!(response.accounts.len(), 1);
     assert_eq!(
         response.accounts[0].account_id,
-        "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b"
+        "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b"
     );
 }
 

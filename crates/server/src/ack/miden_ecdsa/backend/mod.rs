@@ -124,13 +124,13 @@ mod tests {
     }
 
     struct StubBackend {
-        secret: miden_protocol::crypto::dsa::ecdsa_k256_keccak::SigningKey,
+        secret: miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey,
         public_key: PublicKey,
     }
 
     impl StubBackend {
         fn new() -> Self {
-            let secret = miden_protocol::crypto::dsa::ecdsa_k256_keccak::SigningKey::new();
+            let secret = miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey::new();
             let public_key = secret.public_key();
             Self { secret, public_key }
         }
@@ -179,7 +179,7 @@ mod tests {
         let public_key = stub.public_key().clone();
         let signer = MidenEcdsaSigner::new(Arc::new(stub));
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let delta = DeltaObject {
             account_id: account_id.to_string(),
             nonce: 1,

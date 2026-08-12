@@ -7,8 +7,8 @@ use guardian_shared::FromJson;
 use guardian_shared::SignatureScheme;
 use guardian_shared::ToJson;
 use miden_client::account::Account;
-use miden_client::rpc::domain::account::GetAccountRequest;
-use miden_client::rpc::{GrpcError, RpcError};
+use miden_client::rpc::domain::account::AccountStorageRequirements;
+use miden_client::rpc::{AccountStateAt, GrpcError, RpcError};
 use miden_client::transaction::{TransactionRequest, TransactionSummary};
 use miden_protocol::Word;
 use miden_protocol::account::AccountId;
@@ -58,7 +58,13 @@ impl MultisigClient {
     ) -> Result<Word> {
         let rpc_client = self.node_rpc_client();
         let (_, proof) = rpc_client
-            .get_account(account_id, GetAccountRequest::new())
+            .get_account_proof(
+                account_id,
+                AccountStorageRequirements::default(),
+                AccountStateAt::ChainTip,
+                None,
+                None,
+            )
             .await
             .map_err(|e| match e {
                 RpcError::RequestError {
@@ -82,7 +88,13 @@ impl MultisigClient {
     ) -> Result<Option<Word>> {
         let rpc_client = self.node_rpc_client();
         match rpc_client
-            .get_account(account_id, GetAccountRequest::new())
+            .get_account_proof(
+                account_id,
+                AccountStorageRequirements::default(),
+                AccountStateAt::ChainTip,
+                None,
+                None,
+            )
             .await
         {
             Ok((_, proof)) => {
@@ -508,7 +520,7 @@ mod tests {
     use super::MultisigClient;
 
     fn tx_summary_json() -> serde_json::Value {
-        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
         let delta = AccountDelta::new(
             account_id,
             AccountStorageDelta::default(),
@@ -553,10 +565,10 @@ mod tests {
 
     #[test]
     fn ensure_proposal_account_id_accepts_matching_account() {
-        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
 
         let result = MultisigClient::ensure_proposal_account_id(
-            "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b",
+            "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b",
             &account_id,
         );
 
@@ -565,17 +577,17 @@ mod tests {
 
     #[test]
     fn ensure_proposal_account_id_rejects_mismatched_account() {
-        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
 
         let error = MultisigClient::ensure_proposal_account_id(
-            "0x8a8a8a8a8a8a8a010a8a8a8a8a8a8a",
+            "0x8a8a8a8a8a8a8a900a8a8a8a8a8a8a",
             &account_id,
         )
         .unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "invalid configuration: proposal is for account 0x8a8a8a8a8a8a8a010a8a8a8a8a8a8a instead of 0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b"
+            "invalid configuration: proposal is for account 0x8a8a8a8a8a8a8a900a8a8a8a8a8a8a instead of 0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b"
         );
     }
 }

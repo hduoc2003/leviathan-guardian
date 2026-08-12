@@ -15,7 +15,7 @@ use miden_client::note_transport::{
 };
 use miden_client::rpc::{Endpoint, GrpcClient, NodeRpcClient};
 use miden_client_sqlite_store::SqliteStore;
-use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SigningKey as EcdsaSecretKey;
+use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey as EcdsaSecretKey;
 use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
 use miden_protocol::crypto::rand::RandomCoin;
 

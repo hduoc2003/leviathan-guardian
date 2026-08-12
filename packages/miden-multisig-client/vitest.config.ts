@@ -4,10 +4,11 @@ import { defineConfig } from 'vitest/config';
 
 // Tests must run against the WASM build (used in production), not the native
 // napi build that the "node" condition resolves, which omits `Poseidon2`/
-// `FeltArray`. Alias the bare specifier to the WASM single-thread entry and
-// initialize its module in `setupFiles`.
+// `FeltArray`. Alias the bare specifier to the WASM entry and initialize its
+// module in `setupFiles`. The Leviathan SDK build ships a single entry at
+// dist/index.js; public 0.15.x split it into dist/st and dist/mt.
 const midenWasmEntry = fileURLToPath(
-  new URL('./node_modules/@miden-sdk/miden-sdk/dist/st/index.js', import.meta.url),
+  new URL('./node_modules/@miden-sdk/miden-sdk/dist/index.js', import.meta.url),
 );
 
 export default defineConfig({
@@ -18,6 +19,6 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
-    setupFiles: ['./tests/setup-wasm.ts'],
+    setupFiles: ['./tests/setup-globals.ts', './tests/setup-wasm.ts'],
   },
 });

@@ -29,3 +29,6 @@ benchmarks/prod-server/reports/
 
 .DS_Store
 *.artifact
+
+.idea
+.vscode

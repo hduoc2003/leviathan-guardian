@@ -223,9 +223,6 @@ impl MultisigError {
 fn rpc_kind_from_client_error(error: &miden_client::ClientError) -> Option<&GrpcError> {
     match error {
         miden_client::ClientError::RpcError(error) => rpc_kind(error),
-        miden_client::ClientError::ApplyTransactionAfterSubmitFailed { source, .. } => {
-            rpc_kind_from_client_error(source)
-        }
         _ => None,
     }
 }

@@ -283,8 +283,8 @@ mod tests {
     use super::*;
 
     fn build_test_note() -> Note {
-        let sender = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
-        let target = AccountId::from_hex("0x1b1b1b1a1b1b1b011b1b1b1b1b1b1b").unwrap();
+        let sender = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
+        let target = AccountId::from_hex("0x1b1b1b1a1b1b1b901b1b1b1b1b1b1b").unwrap();
         let mut rng = RandomCoin::new(Word::default());
         P2idNote::create(
             sender,

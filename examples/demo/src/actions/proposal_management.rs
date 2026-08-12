@@ -1261,7 +1261,7 @@ fn prompt_p2id(
         .ok_or_else(|| "Invalid selection".to_string())?;
 
     let faucet_id = selected_asset.faucet_id();
-    let max_amount = selected_asset.amount().as_u64();
+    let max_amount = selected_asset.amount();
 
     println!(
         "\nSelected: {} tokens from faucet {}",

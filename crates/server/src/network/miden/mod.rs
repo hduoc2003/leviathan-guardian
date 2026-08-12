@@ -574,7 +574,7 @@ mod tests {
         let network = NetworkType::MidenTestnet;
         let client = MidenNetworkClient::lazy_for_test(network);
 
-        let account_id_hex = "0x8a8a8a8a8a8a8a010a8a8a8a8a8a8a";
+        let account_id_hex = "0x8a8a8a8a8a8a8a900a8a8a8a8a8a8a";
         let state_json = serde_json::json!({"balance": 0});
 
         let result = client.get_state_commitment(account_id_hex, &state_json);
@@ -712,7 +712,7 @@ mod tests {
         use miden_protocol::Felt;
         use miden_protocol::account::AccountDelta;
         use miden_protocol::account::delta::{AccountStorageDelta, AccountVaultDelta};
-        use miden_protocol::account::{AccountBuilder, AccountType};
+        use miden_protocol::account::{AccountBuilder, AccountStorageMode};
         use miden_standards::account::auth::NoAuth;
         use miden_standards::account::wallets::BasicWallet;
 
@@ -722,7 +722,7 @@ mod tests {
         // Create a simple account without GUARDIAN auth to test the full state delta path
         // This avoids the replay protection logic which requires proper storage maps
         let account = AccountBuilder::new([0xAB; 32])
-            .account_type(AccountType::Public)
+            .storage_mode(AccountStorageMode::Public)
             .with_component(BasicWallet)
             .with_auth_component(NoAuth)
             .build()
@@ -735,7 +735,7 @@ mod tests {
             account.id(),
             AccountStorageDelta::default(),
             AccountVaultDelta::default(),
-            Felt::new_unchecked(1), // nonce delta
+            Felt::new(1), // nonce delta
         )
         .expect("Failed to create delta")
         .with_code(Some(account.code().clone()));
@@ -789,8 +789,8 @@ mod tests {
         use miden_protocol::Felt;
         use miden_protocol::account::delta::{AccountStorageDelta, AccountVaultDelta};
         use miden_protocol::account::{
-            AccountCode, AccountDelta, AccountId, AccountIdVersion, AccountStorage, AccountType,
-            StorageSlot, StorageSlotName,
+            AccountCode, AccountDelta, AccountId, AccountIdVersion, AccountStorage,
+            AccountStorageMode, AccountType, StorageSlot, StorageSlotName,
         };
         use miden_protocol::asset::AssetVault;
 
@@ -810,14 +810,18 @@ mod tests {
             guardian_off,
         )])
         .expect("valid storage");
-        let account_id =
-            AccountId::dummy([7u8; 15], AccountIdVersion::Version1, AccountType::Private);
+        let account_id = AccountId::dummy(
+            [7u8; 15],
+            AccountIdVersion::Version0,
+            AccountType::RegularAccountUpdatableCode,
+            AccountStorageMode::Private,
+        );
         let prev_account = Account::new_existing(
             account_id,
             AssetVault::new(&[]).expect("empty vault"),
             storage,
             AccountCode::mock(),
-            Felt::new_unchecked(1),
+            Felt::new(1),
         );
         let prev_state_json = prev_account.to_json();
 
@@ -826,7 +830,7 @@ mod tests {
             prev_account.id(),
             AccountStorageDelta::default(),
             AccountVaultDelta::default(),
-            Felt::new_unchecked(1),
+            Felt::new(1),
         )
         .expect("valid delta");
         assert!(
@@ -862,8 +866,8 @@ mod tests {
         use miden_protocol::Felt;
         use miden_protocol::account::delta::{AccountStorageDelta, AccountVaultDelta};
         use miden_protocol::account::{
-            AccountCode, AccountDelta, AccountId, AccountIdVersion, AccountStorage, AccountType,
-            StorageSlot, StorageSlotName,
+            AccountCode, AccountDelta, AccountId, AccountIdVersion, AccountStorage,
+            AccountStorageMode, AccountType, StorageSlot, StorageSlotName,
         };
         use miden_protocol::asset::AssetVault;
 
@@ -876,8 +880,12 @@ mod tests {
 
         let selector_name =
             StorageSlotName::new(GUARDIAN_SELECTOR_SLOT_NAME).expect("valid slot name");
-        let account_id =
-            AccountId::dummy([8u8; 15], AccountIdVersion::Version1, AccountType::Private);
+        let account_id = AccountId::dummy(
+            [8u8; 15],
+            AccountIdVersion::Version0,
+            AccountType::RegularAccountUpdatableCode,
+            AccountStorageMode::Private,
+        );
 
         // The stored initial state (registered via `/configure`): guardian enabled.
         let prev_storage = AccountStorage::new(vec![StorageSlot::with_value(
@@ -890,7 +898,7 @@ mod tests {
             AssetVault::new(&[]).expect("empty vault"),
             prev_storage,
             AccountCode::mock(),
-            Felt::new_unchecked(1),
+            Felt::new(1),
         );
         let prev_state_json = prev_account.to_json();
 
@@ -905,7 +913,7 @@ mod tests {
             account_id,
             storage_delta,
             AccountVaultDelta::default(),
-            Felt::new_unchecked(1),
+            Felt::new(1),
         )
         .expect("valid delta")
         .with_code(Some(AccountCode::mock()));
@@ -949,7 +957,7 @@ mod tests {
             AssetVault::new(&[]).expect("empty vault"),
             off_storage,
             AccountCode::mock(),
-            Felt::new_unchecked(1),
+            Felt::new(1),
         );
         let (off_state_json, _) = client
             .apply_delta(&off_prev.to_json(), &delta_payload)

@@ -13,7 +13,7 @@ use miden_protocol::Word;
 use miden_protocol::account::delta::{AccountStorageDelta, AccountVaultDelta};
 use miden_protocol::account::{AccountDelta, AccountId};
 use miden_protocol::crypto::dsa::ecdsa_k256_keccak::{
-    PublicKey as EcdsaPublicKey, SigningKey as EcdsaSecretKey,
+    PublicKey as EcdsaPublicKey, SecretKey as EcdsaSecretKey,
 };
 use miden_protocol::crypto::dsa::falcon512_poseidon2::{
     PublicKey as FalconPublicKey, SecretKey as FalconSecretKey,
@@ -805,7 +805,7 @@ fn create_delta_payload(account_id: &AccountId, nonce: u64) -> Result<Value> {
         account_id.to_owned(),
         AccountStorageDelta::default(),
         AccountVaultDelta::default(),
-        Felt::new_unchecked(nonce),
+        Felt::new(nonce),
     )
     .map_err(|e| anyhow!("failed to build account delta: {e}"))?;
     let tx_summary = TransactionSummary::new(

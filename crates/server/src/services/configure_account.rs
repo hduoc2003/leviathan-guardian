@@ -321,7 +321,7 @@ mod tests {
     async fn test_configure_account_success() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -377,7 +377,7 @@ mod tests {
         use crate::testing::helpers::TestEcdsaSigner;
         use guardian_shared::auth_request_payload::AuthRequestPayload;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let signer = TestEcdsaSigner::new();
 
         let network_client = MockNetworkClient::new()
@@ -433,7 +433,7 @@ mod tests {
     async fn test_configure_account_already_exists_reconfigures() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -492,7 +492,7 @@ mod tests {
     async fn test_configure_account_preserves_existing_pause_state() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -560,7 +560,7 @@ mod tests {
     async fn test_configure_account_reonboarding_clears_released_state() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -621,7 +621,7 @@ mod tests {
     async fn test_configure_account_reonboarding_fails_closed_when_clear_released_fails() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -682,7 +682,7 @@ mod tests {
     async fn test_configure_account_network_error() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -720,7 +720,7 @@ mod tests {
     async fn test_configure_account_unauthorized_guardian_commitment() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -769,7 +769,7 @@ mod tests {
     async fn test_configure_account_rejects_mismatched_cosigner_commitments() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, _commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -820,7 +820,7 @@ mod tests {
     async fn test_configure_account_rejects_injected_extra_cosigner() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -864,7 +864,7 @@ mod tests {
     async fn test_configure_account_cosigner_extraction_error() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 
@@ -903,7 +903,7 @@ mod tests {
     async fn test_rejects_reordered_commitments() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
         let other_hex = format!("0x{}", "aa".repeat(32));
@@ -945,7 +945,7 @@ mod tests {
     async fn test_rejects_non_canonical_empty_and_duplicate_commitment_lists() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let canonical = format!("0x{}", "ab".repeat(32));
 
         let cases: Vec<(Vec<String>, &str)> = vec![
@@ -995,7 +995,7 @@ mod tests {
     async fn test_configure_account_skips_validation_without_extractable_signers() {
         use crate::testing::helpers::generate_falcon_signature;
 
-        let account_id_hex = "0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d";
+        let account_id_hex = "0x1d1d1d1c1d1d1d901d1d1d1d1d1d1d";
         let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
             generate_falcon_signature(account_id_hex);
 

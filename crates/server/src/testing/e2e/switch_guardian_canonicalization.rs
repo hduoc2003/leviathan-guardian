@@ -35,7 +35,7 @@ use miden_confidential_contracts::multisig_guardian::{
     MultisigGuardianBuilder, MultisigGuardianConfig,
 };
 use miden_protocol::account::auth::AuthSecretKey;
-use miden_protocol::account::{Account, AccountType};
+use miden_protocol::account::{Account, AccountStorageMode};
 use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
 use miden_protocol::utils::serde::{Deserializable, Serializable};
 use miden_protocol::vm::AdviceInputs;
@@ -104,7 +104,7 @@ async fn test_switch_guardian_delta_canonicalizes_and_releases_on_old_guardian()
         .collect();
 
     let config = MultisigGuardianConfig::new(2, signer_commitments, ack_commitment_word)
-        .with_account_type(AccountType::Public)
+        .with_storage_mode(AccountStorageMode::Public)
         .with_guardian_enabled(true)
         .with_signature_scheme(SignatureScheme::Falcon);
     let multisig_account = MultisigGuardianBuilder::new(config)
@@ -146,7 +146,7 @@ async fn test_switch_guardian_delta_canonicalizes_and_releases_on_old_guardian()
         .expect("library links")
         .compile_tx_script(tx_script_code)
         .expect("tx script compiles");
-    let salt = Word::from([Felt::new_unchecked(7); 4]);
+    let salt = Word::from([Felt::new(7); 4]);
 
     // No-signature execution: the TransactionSummary the wallet pushes to the
     // pre-switch guardian as the delta payload.

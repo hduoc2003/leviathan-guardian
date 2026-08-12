@@ -82,7 +82,12 @@ impl rpc::api_server::Api for ScriptedNode {
         Ok(tonic::Response::new(rpc::RpcStatus {
             version: "scripted".to_string(),
             genesis_commitment: None,
-            chain_tip: 7,
+            store: Some(rpc::StoreStatus {
+                version: "scripted".to_string(),
+                status: "connected".to_string(),
+                chain_tip: 7,
+                aggregation: None,
+            }),
             block_producer: None,
         }))
     }
@@ -95,31 +100,25 @@ impl rpc::api_server::Api for ScriptedNode {
         Ok(tonic::Response::new(rpc::RpcLimits::default()))
     }
 
-    type BlockSubscriptionStream = std::pin::Pin<
-        Box<
-            dyn tonic::codegen::tokio_stream::Stream<
-                    Item = std::result::Result<rpc::BlockSubscriptionResponse, tonic::Status>,
-                > + Send,
-        >,
-    >;
-    async fn block_subscription(
+    async fn check_nullifiers(
         &self,
-        _: tonic::Request<rpc::BlockSubscriptionRequest>,
-    ) -> std::result::Result<tonic::Response<Self::BlockSubscriptionStream>, tonic::Status> {
+        _: tonic::Request<rpc::NullifierList>,
+    ) -> std::result::Result<tonic::Response<rpc::CheckNullifiersResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("scripted node"))
     }
 
-    type ProofSubscriptionStream = std::pin::Pin<
-        Box<
-            dyn tonic::codegen::tokio_stream::Stream<
-                    Item = std::result::Result<rpc::ProofSubscriptionResponse, tonic::Status>,
-                > + Send,
-        >,
-    >;
-    async fn proof_subscription(
+    async fn get_aggregated_proof(
         &self,
-        _: tonic::Request<rpc::ProofSubscriptionRequest>,
-    ) -> std::result::Result<tonic::Response<Self::ProofSubscriptionStream>, tonic::Status> {
+        _: tonic::Request<rpc::GetAggregatedProofRequest>,
+    ) -> std::result::Result<tonic::Response<rpc::GetAggregatedProofResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("scripted node"))
+    }
+
+    async fn get_epoch_by_state_commitment(
+        &self,
+        _: tonic::Request<rpc::GetEpochByStateCommitmentRequest>,
+    ) -> std::result::Result<tonic::Response<rpc::GetEpochByStateCommitmentResponse>, tonic::Status>
+    {
         Err(tonic::Status::unimplemented("scripted node"))
     }
 
@@ -132,7 +131,7 @@ impl rpc::api_server::Api for ScriptedNode {
 
     async fn get_block_by_number(
         &self,
-        _: tonic::Request<blockchain::BlockRequest>,
+        _: tonic::Request<blockchain::BlockNumber>,
     ) -> std::result::Result<tonic::Response<blockchain::MaybeBlock>, tonic::Status> {
         Err(tonic::Status::unimplemented("scripted node"))
     }
@@ -158,14 +157,14 @@ impl rpc::api_server::Api for ScriptedNode {
         Err(tonic::Status::unimplemented("scripted node"))
     }
 
-    async fn submit_proven_tx(
+    async fn submit_proven_transaction(
         &self,
         _: tonic::Request<transaction::ProvenTransaction>,
     ) -> std::result::Result<tonic::Response<blockchain::BlockNumber>, tonic::Status> {
         Err(tonic::Status::unimplemented("scripted node"))
     }
 
-    async fn submit_proven_tx_batch(
+    async fn submit_proven_batch(
         &self,
         _: tonic::Request<transaction::TransactionBatch>,
     ) -> std::result::Result<tonic::Response<blockchain::BlockNumber>, tonic::Status> {
@@ -215,11 +214,10 @@ impl rpc::api_server::Api for ScriptedNode {
         Err(tonic::Status::unimplemented("scripted node"))
     }
 
-    async fn get_network_note_status(
+    async fn get_note_error(
         &self,
         _: tonic::Request<note::NoteId>,
-    ) -> std::result::Result<tonic::Response<rpc::GetNetworkNoteStatusResponse>, tonic::Status>
-    {
+    ) -> std::result::Result<tonic::Response<rpc::GetNoteErrorResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("scripted node"))
     }
 }

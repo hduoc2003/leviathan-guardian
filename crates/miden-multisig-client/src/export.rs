@@ -685,11 +685,11 @@ mod tests {
 
     // Helper for valid account ID (15 bytes = 30 hex chars)
     fn valid_account_id() -> String {
-        "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string()
+        "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string()
     }
 
     fn valid_faucet_id() -> String {
-        "0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c".to_string()
+        "0x7c7c7c7c7c7c7c907c7c7c7c7c7c7c".to_string()
     }
 
     // Helper for valid 32-byte hex (Word)
@@ -716,7 +716,7 @@ mod tests {
             account_delta,
             InputNotes::new(Vec::new()).expect("empty input notes"),
             RawOutputNotes::new(Vec::new()).expect("empty output notes"),
-            Word::from([Felt::new_unchecked(7), ZERO, ZERO, ZERO]),
+            Word::from([Felt::new(7), ZERO, ZERO, ZERO]),
         )
     }
 

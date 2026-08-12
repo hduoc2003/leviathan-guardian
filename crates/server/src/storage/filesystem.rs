@@ -1398,7 +1398,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let canonical = create_test_delta(account_id, 1);
         let mut retained_late = create_test_delta(account_id, 3);
         retained_late.status = DeltaStatus::retained(
@@ -1464,7 +1464,7 @@ mod tests {
                 .await
                 .expect("metadata store");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let mut retained = create_test_delta(account_id, 1);
         retained.status = DeltaStatus::retained(
             "2024-11-14T12:00:00Z".to_string(),
@@ -1523,7 +1523,7 @@ mod tests {
                 .await
                 .expect("metadata store");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         seed_account(&storage, &metadata_store, account_id).await;
 
         let mut retained = create_test_delta(account_id, 1);
@@ -1605,7 +1605,7 @@ mod tests {
             crate::metadata::filesystem::FilesystemMetadataStore::new(temp_dir.clone())
                 .await
                 .expect("metadata store");
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         seed_account(&storage, &metadata_store, account_id).await;
 
         let mut first = create_test_delta(account_id, 1);
@@ -1659,7 +1659,7 @@ mod tests {
             crate::metadata::filesystem::FilesystemMetadataStore::new(temp_dir.clone())
                 .await
                 .expect("metadata store");
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         seed_account(&storage, &metadata_store, account_id).await;
 
         let mut first = create_test_delta(account_id, 1);
@@ -1702,7 +1702,7 @@ mod tests {
             crate::metadata::filesystem::FilesystemMetadataStore::new(temp_dir.clone())
                 .await
                 .expect("metadata store");
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         seed_account(&storage, &metadata_store, account_id).await;
 
         // The account state advanced after service-layer validation:
@@ -1751,7 +1751,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let mut delta = create_test_delta(account_id, 1);
         delta.status = DeltaStatus::candidate("2024-11-14T12:00:00Z".to_string());
         storage.submit_delta(&delta).await.expect("submit works");
@@ -1777,7 +1777,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let mut delta = create_test_delta(account_id, 1);
         delta.status = DeltaStatus::candidate("2024-11-14T12:00:00Z".to_string());
         storage.submit_delta(&delta).await.expect("submit works");
@@ -1806,7 +1806,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         // create_test_delta is canonical by default.
         let delta = create_test_delta(account_id, 1);
         storage.submit_delta(&delta).await.expect("submit works");
@@ -1831,7 +1831,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let mut delta = create_test_delta(account_id, 1);
         delta.status = DeltaStatus::candidate("2024-11-14T12:00:00Z".to_string());
         storage.submit_delta(&delta).await.expect("submit works");
@@ -1868,7 +1868,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         // create_test_delta is canonical by default.
         let delta = create_test_delta(account_id, 1);
         storage.submit_delta(&delta).await.expect("submit works");
@@ -1895,7 +1895,7 @@ mod tests {
             .expect("Failed to create storage");
 
         let intent = storage
-            .request_candidate_abandon("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b", 1, "now")
+            .request_candidate_abandon("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b", 1, "now")
             .await
             .expect("call works");
         assert_eq!(intent, AbandonIntent::NotCandidate);
@@ -1908,7 +1908,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let state = create_test_state(account_id);
 
         // Submit state
@@ -1938,7 +1938,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let delta = create_test_delta(account_id, 1);
 
         // Submit delta
@@ -1968,7 +1968,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
 
         // Submit multiple deltas
         for nonce in 1..=5 {
@@ -2002,7 +2002,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
 
         // Mixed history: canonical at 1 and 3, candidates at 4 and 2
         // (submitted out of nonce order).
@@ -2099,7 +2099,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
 
         // Pull deltas when none exist
         let deltas = storage
@@ -2120,7 +2120,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let commitment = "0xabc123";
         let proposal = create_test_delta(account_id, 1);
 
@@ -2150,7 +2150,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
 
         // Submit multiple proposals
         let commitments = ["0xaaaa", "0xbbbb", "0xcccc"];
@@ -2181,7 +2181,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let commitment = "0xabc123";
         let mut proposal = create_test_delta(account_id, 1);
 
@@ -2217,7 +2217,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let commitment = "0xabc123";
         let proposal = create_test_delta(account_id, 1);
 
@@ -2254,7 +2254,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let commitment = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
         // Delete nonexistent proposal should succeed (no-op)
@@ -2272,7 +2272,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let commitment_with_prefix = "0xabc123";
         let commitment_without_prefix = "abc123";
         let proposal = create_test_delta(account_id, 1);
@@ -2305,7 +2305,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let result = storage
             .pull_delta_proposal(account_id, "../../other_account/proposals/abc")
             .await;
@@ -2323,7 +2323,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let delta = create_test_delta(account_id, 1);
 
         // Submit delta
@@ -2359,7 +2359,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
 
         // Delete nonexistent delta should succeed (no-op)
         let result = storage.delete_delta(account_id, 999).await;
@@ -2376,7 +2376,7 @@ mod tests {
             .await
             .expect("Failed to create storage");
 
-        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
         let mut delta = create_test_delta(account_id, 1);
         delta.status = DeltaStatus::candidate("2024-01-01T00:00:00Z".to_string());
 

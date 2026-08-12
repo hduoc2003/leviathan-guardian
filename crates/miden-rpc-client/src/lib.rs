@@ -300,7 +300,7 @@ impl MidenRpcClient {
         };
 
         self.client
-            .submit_proven_tx(Request::new(request))
+            .submit_proven_transaction(Request::new(request))
             .await
             .map_err(|status| RpcClientError::Call {
                 operation: "submit_transaction",
@@ -331,7 +331,7 @@ impl MidenRpcClient {
                 let request = rpc::SyncNotesRequest {
                     block_range: Some(rpc::BlockRange {
                         block_from: block_num,
-                        block_to: u32::MAX,
+                        block_to: None,
                     }),
                     note_tags: note_tags.clone(),
                 };

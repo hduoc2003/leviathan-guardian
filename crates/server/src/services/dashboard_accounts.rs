@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn bech32_for_miden_account_encodes_with_server_network_hrp() {
-        let meta = miden_meta("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b", "2026-05-26T00:00:00Z");
+        let meta = miden_meta("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b", "2026-05-26T00:00:00Z");
         let bech32 = bech32_for_account(&meta, NetworkType::MidenTestnet)
             .expect("bech32 encodes for valid miden id");
         assert!(
@@ -361,7 +361,7 @@ mod tests {
     /// per-account value.
     #[test]
     fn bech32_ignores_stale_local_network_config_in_metadata() {
-        let mut meta = miden_meta("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b", "2026-05-26T00:00:00Z");
+        let mut meta = miden_meta("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b", "2026-05-26T00:00:00Z");
         meta.network_config = NetworkConfig::Miden {
             network_type: MidenNetworkType::Local,
         };

@@ -37,7 +37,7 @@ use miden_confidential_contracts::masm_builder::get_guardian_library;
 use miden_confidential_contracts::multisig_guardian::{
     MultisigGuardianBuilder, MultisigGuardianConfig,
 };
-use miden_protocol::account::{Account, AccountType};
+use miden_protocol::account::{Account, AccountStorageMode};
 use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
 use miden_protocol::utils::serde::Serializable;
 use miden_protocol::vm::AdviceInputs;
@@ -150,7 +150,7 @@ async fn stranded_candidate_setup(landed: bool) -> StrandedCandidateSetup {
         .collect();
 
     let config = MultisigGuardianConfig::new(2, signer_commitments, ack_commitment_word)
-        .with_account_type(AccountType::Public)
+        .with_storage_mode(AccountStorageMode::Public)
         .with_guardian_enabled(true)
         .with_signature_scheme(SignatureScheme::Falcon);
     let multisig_account = MultisigGuardianBuilder::new(config)
@@ -185,7 +185,7 @@ async fn stranded_candidate_setup(landed: bool) -> StrandedCandidateSetup {
             "#,
         )
         .expect("tx script compiles");
-    let salt = Word::from([Felt::new_unchecked(7); 4]);
+    let salt = Word::from([Felt::new(7); 4]);
 
     let abort_summary = match mock_chain
         .build_tx_context(multisig_account.id(), &[], &[])

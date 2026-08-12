@@ -310,7 +310,7 @@ impl ProposalMetadata {
     pub fn salt(&self) -> Result<Word> {
         match &self.salt_hex {
             Some(value) => word_from_hex(value).map_err(MultisigError::InvalidConfig),
-            None => Ok(Word::from([Felt::new_unchecked(0); 4])),
+            None => Ok(Word::from([Felt::new(0); 4])),
         }
     }
 
@@ -805,7 +805,7 @@ mod tests {
 
     fn create_test_tx_summary() -> TransactionSummary {
         // Use a minimal valid account ID
-        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
         let delta = AccountDelta::new(
             account_id,
             AccountStorageDelta::default(),
@@ -852,8 +852,8 @@ mod tests {
     #[test]
     fn test_transaction_type_transfer() {
         // Use valid Miden AccountId format
-        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
-        let faucet_id = AccountId::from_hex("0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c").unwrap();
+        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
+        let faucet_id = AccountId::from_hex("0x7c7c7c7c7c7c7c907c7c7c7c7c7c7c").unwrap();
         let amount = 1000u64;
 
         let tx = TransactionType::transfer(recipient, faucet_id, amount);
@@ -953,8 +953,8 @@ mod tests {
 
     #[test]
     fn test_transaction_type_requires_guardian_ack() {
-        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
-        let faucet_id = AccountId::from_hex("0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c").unwrap();
+        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
+        let faucet_id = AccountId::from_hex("0x7c7c7c7c7c7c7c907c7c7c7c7c7c7c").unwrap();
 
         assert!(TransactionType::transfer(recipient, faucet_id, 1).requires_guardian_ack());
         assert!(
@@ -1300,8 +1300,8 @@ mod tests {
 
     fn p2id_metadata(note_type: Option<&str>) -> ProposalMetadata {
         ProposalMetadata {
-            recipient_hex: Some("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string()),
-            faucet_id_hex: Some("0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c".to_string()),
+            recipient_hex: Some("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string()),
+            faucet_id_hex: Some("0x7c7c7c7c7c7c7c907c7c7c7c7c7c7c".to_string()),
             amount: Some(1000),
             note_type: note_type.map(str::to_string),
             ..Default::default()
