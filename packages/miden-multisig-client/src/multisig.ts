@@ -187,7 +187,7 @@ export class Multisig {
     this.midenRpcEndpoint = requireMidenRpcEndpoint(midenRpcEndpoint);
     this.rawClientPromise = getRawMidenClient(midenClient, this.midenRpcEndpoint);
     this.proverWorkflow = new ProverWorkflow(
-      this.midenClient,
+      this.rawClientPromise,
       proverConfig ?? resolveProverConfig(undefined, getTransactionProver(midenClient)),
     );
     this.rpcConfig = rpcConfig ?? resolveRpcConfig(undefined);
@@ -1077,7 +1077,7 @@ export class Multisig {
       throw new Error(`failed to decode note file: ${detail}`);
     }
 
-    return webClient.importNoteFile(noteFile);
+    return (await webClient.importNoteFile(noteFile)).toString();
   }
 
   /**

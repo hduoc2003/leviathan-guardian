@@ -3154,7 +3154,7 @@ dependencies = [
 
 [[package]]
 name = "guardian-client"
-version = "0.16.1"
+version = "0.15.0"
 dependencies = [
  "chrono",
  "guardian-shared",
@@ -3234,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "guardian-server"
-version = "0.16.1"
+version = "0.15.0"
 dependencies = [
  "aes-gcm",
  "alloy",
@@ -3324,7 +3324,7 @@ dependencies = [
 
 [[package]]
 name = "guardian-shared"
-version = "0.16.1"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -3683,7 +3683,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tokio",
  "tower-service",
  "tracing",
@@ -4539,7 +4539,7 @@ dependencies = [
 [[package]]
 name = "miden-client"
 version = "0.15.0"
-source = "git+https://git.softly.com/leviathan/miden-client?rev=a22c25071920250ca3731a7b2f77e7cf902d35b2#a22c25071920250ca3731a7b2f77e7cf902d35b2"
+source = "git+https://git.softly.com/leviathan/miden-client?rev=5ee909c28ca89840e9623a0fbb954be198ef0774#5ee909c28ca89840e9623a0fbb954be198ef0774"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4576,7 +4576,7 @@ dependencies = [
 [[package]]
 name = "miden-client-sqlite-store"
 version = "0.15.0"
-source = "git+https://git.softly.com/leviathan/miden-client?rev=a22c25071920250ca3731a7b2f77e7cf902d35b2#a22c25071920250ca3731a7b2f77e7cf902d35b2"
+source = "git+https://git.softly.com/leviathan/miden-client?rev=5ee909c28ca89840e9623a0fbb954be198ef0774#5ee909c28ca89840e9623a0fbb954be198ef0774"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4593,7 +4593,7 @@ dependencies = [
 
 [[package]]
 name = "miden-confidential-contracts"
-version = "0.16.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -4804,7 +4804,7 @@ dependencies = [
 
 [[package]]
 name = "miden-multisig-client"
-version = "0.16.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5015,7 +5015,7 @@ dependencies = [
 
 [[package]]
 name = "miden-rpc-client"
-version = "0.16.1"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "guardian-shared",
@@ -6483,7 +6483,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.37",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6521,7 +6521,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.52.0",
 ]

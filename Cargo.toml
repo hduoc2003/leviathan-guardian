@@ -24,7 +24,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.16.1"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.93"
 authors = ["OpenZeppelin"]
@@ -74,10 +74,6 @@ miden-testing = "0.15"
 miden-client = "0.15"
 miden-client-sqlite-store = "0.15"
 
-# Leviathan (Miden fork) sources. protocol and node match what the live testnet
-# node runs; miden-client matches the WASM SDK the TypeScript package resolves,
-# so both SDKs derive the same account IDs and note serials. Bumping any of
-# these alone re-splits them - see `.claude/FORK.md`.
 [patch.crates-io]
 miden-crypto          = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
 miden-crypto-derive   = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
@@ -104,5 +100,5 @@ miden-node-proto           = { git = "https://git.softly.com/leviathan/node", re
 miden-node-proto-build     = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
 miden-node-utils           = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
 miden-remote-prover-client = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
-miden-client              = { git = "https://git.softly.com/leviathan/miden-client", rev = "a22c25071920250ca3731a7b2f77e7cf902d35b2" }
-miden-client-sqlite-store = { git = "https://git.softly.com/leviathan/miden-client", rev = "a22c25071920250ca3731a7b2f77e7cf902d35b2" }
+miden-client              = { git = "https://git.softly.com/leviathan/miden-client", rev = "5ee909c28ca89840e9623a0fbb954be198ef0774" }
+miden-client-sqlite-store = { git = "https://git.softly.com/leviathan/miden-client", rev = "5ee909c28ca89840e9623a0fbb954be198ef0774" }

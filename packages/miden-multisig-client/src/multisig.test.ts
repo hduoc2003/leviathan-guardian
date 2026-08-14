@@ -2293,6 +2293,9 @@ describe('Multisig', () => {
         ok: false,
         status: 404,
         statusText: 'Not Found',
+        // The client reads Retry-After off the error response, so the mock has
+        // to carry headers or it fails before the envelope is ever parsed.
+        headers: { get: () => null },
         // Feature 009: only a conforming { code, message, meta } envelope is
         // folded into the error message; raw text bodies are dropped.
         text: async () =>

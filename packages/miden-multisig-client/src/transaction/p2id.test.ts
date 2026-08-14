@@ -235,6 +235,48 @@ describe('buildP2idTransactionRequest', () => {
     }
   });
 
+  it('rebuilds the transferred asset from the held asset vault key', () => {
+    buildP2idTransactionRequest(
+      '0x7bfb0f38b0fafa103f86a805594170',
+      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
+      FAUCET_ID,
+      10n,
+      mockAccount,
+    );
+
+    // The vault key carries the callback flag, which is part of the asset
+    // commitment; the plain constructor would default it and the transfer
+    // would abort.
+    expect(mockFromVaultKey).toHaveBeenCalledTimes(1);
+    expect(mockFromVaultKey).toHaveBeenCalledWith({ kind: 'vault-key' }, 10n);
+    expect(mockFungibleAssetConstructor).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the plain constructor when the vault holds no such asset', () => {
+    const emptyVault = {
+      vault: () => ({ fungibleAssets: () => [] }),
+    } as unknown as Account;
+
+    buildP2idTransactionRequest(
+      '0x7bfb0f38b0fafa103f86a805594170',
+      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
+      FAUCET_ID,
+      10n,
+      emptyVault,
+    );
+
+    // Execution then surfaces the missing-asset error, which is more useful
+    // than guessing a vault key that is not there.
+    expect(mockFromVaultKey).not.toHaveBeenCalled();
+    expect(mockFungibleAssetConstructor).toHaveBeenCalledTimes(1);
+    const [faucetArg, amountArg] = mockFungibleAssetConstructor.mock.calls[0] as [
+      { toString(): string },
+      bigint,
+    ];
+    expect(faucetArg.toString()).toBe(FAUCET_ID);
+    expect(amountArg).toBe(10n);
+  });
+
   it('creates a public note by default (issue #322)', () => {
     buildP2idTransactionRequest(
       '0x7bfb0f38b0fafa103f86a805594170',
