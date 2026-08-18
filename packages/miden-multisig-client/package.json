@@ -36,7 +36,7 @@
     "test:watch": "npm run generate:masm && vitest"
   },
   "dependencies": {
-    "@miden-sdk/miden-sdk": "0.15.0-node.5ee909c28",
+    "@miden-sdk/miden-sdk": "0.15.0-node.4209a465d",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^2.0.1",
     "@openzeppelin/guardian-client": "file:../guardian-client"
