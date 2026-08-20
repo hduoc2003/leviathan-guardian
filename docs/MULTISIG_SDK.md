@@ -639,8 +639,26 @@ const proposal = await multisig.createChangeThresholdProposal(
 
 #### Switch GUARDIAN Provider
 
+Switching away from a GUARDIAN that is **unreachable** is the one flow that must
+not depend on it. `createSwitchGuardianProposalWithFallback` picks the path and
+reports which one it took; pass that mode on, because `offline` must be executed
+with `executeProposalOffline` (the online executor ends by releasing the previous
+GUARDIAN, which an offline proposal was never sent to). Cosigners are reached
+with `exportProposalToJson` / `importProposal` / `signProposalOffline` instead of
+the GUARDIAN. Every other proposal type needs the GUARDIAN alive for its ack, so
+these methods exist for `switch_guardian` alone, and `executeProposalOffline`
+refuses anything else.
+
+The TS fallback deliberately differs from Rust's `propose_with_fallback`. It
+takes the offline path only when the failure looks like connectivity **and** a
+follow-up liveness probe also fails to reach the guardian. A guardian that
+answers - including one answering `429`, or a codeless `502` from a gateway that
+turns out to still be up - may already hold the proposal, and a second offline
+copy would leave one on each side. Rust falls back on any server error and wants
+the same narrowing.
+
 ```typescript
-const proposal = await multisig.createSwitchGuardianProposal(
+const { proposal, mode } = await multisig.createSwitchGuardianProposalWithFallback(
   newGuardianEndpoint,        // New GUARDIAN server URL
   newGuardianCommitment       // New GUARDIAN server's public key
 );
@@ -685,6 +703,11 @@ const signedProposal = multisig.importProposal(signedJson);
 await multisig.executeProposal(signedProposal.id);
 ```
 
+A `switch_guardian` proposal built offline must be executed with
+`executeProposalOffline` instead: `executeProposal` ends by releasing the
+previous GUARDIAN, which never received that proposal. The exported JSON does
+not record which path built it, so the importing process has to be told.
+
 ### API Reference
 
 #### MultisigClient
@@ -693,6 +716,7 @@ await multisig.executeProposal(signedProposal.id);
 |--------|-------------|
 | `create(config, signer)` | Create new multisig account |
 | `load(accountId, signer)` | Load existing account from GUARDIAN |
+| `loadFromAccount(account, signer)` | Load from an account the caller already holds, without asking GUARDIAN for it |
 | `recoverByKey(signer)` | Discover accounts that authorize the signer's key and fetch each current state |
 | `guardianClient` | Access to underlying GUARDIAN HTTP client |
 
@@ -720,8 +744,11 @@ await multisig.executeProposal(signedProposal.id);
 | `createRemoveSignerProposal(commitment, nonce?, threshold?)` | Create remove signer proposal |
 | `createChangeThresholdProposal(threshold, nonce?)` | Create threshold change proposal |
 | `createSwitchGuardianProposal(endpoint, pubkey, nonce?)` | Create GUARDIAN switch proposal |
+| `createSwitchGuardianProposalOffline(endpoint, pubkey, nonce?)` | Same, kept off the GUARDIAN being replaced |
+| `createSwitchGuardianProposalWithFallback(endpoint, pubkey, nonce?)` | Online, falling back to offline when that GUARDIAN is unreachable; returns `{ proposal, mode }` |
 | `signProposal(id)` | Sign a proposal |
 | `executeProposal(id)` | Execute ready proposal |
+| `executeProposalOffline(id)` | Execute a `switch_guardian` proposal without the post-switch release of the previous GUARDIAN |
 | `exportProposalToJson(id)` | Export for offline signing |
 | `importProposal(json)` | Import offline proposal |
 | `signProposalOffline(id)` | Sign imported proposal offline |

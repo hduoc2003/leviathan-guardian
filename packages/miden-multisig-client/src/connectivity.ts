@@ -14,7 +14,7 @@
  * surface failures with different shapes, so the message string is the only
  * stable join key.
  */
-import { GuardianHttpError } from '@openzeppelin/guardian-client';
+import { GuardianHttpError, GuardianTransportError } from '@openzeppelin/guardian-client';
 
 /**
  * Connectivity category for a codeless transport failure:
@@ -53,13 +53,23 @@ function classifyTransportError(err: unknown): ConnectivityCategory {
 }
 
 /**
+ * Heuristic for an error that did **not** come through `GuardianHttpClient` -
+ * anything it raises is already typed, so prefer `instanceof
+ * GuardianTransportError`. Kept for foreign errors reaching the public
+ * {@link toUserFacingError}.
+ *
  * Does this error look like a codeless transport/connectivity failure (vs a
- * semantic Guardian error)? String heuristic — see module docs.
+ * semantic Guardian error)? String heuristic - see module docs. Matches only the
+ * error's own message. undici sets `fetch failed` / `terminated` as the entire
+ * message, so those are matched exactly - a worker OOM also says "terminated" -
+ * and the cause chain is deliberately out of scope, since a semantic failure
+ * that merely wraps a recovered socket error is not a connectivity problem.
  */
 export function isLikelyNetworkError(err: unknown): boolean {
   const message = (err as { message?: string } | null | undefined)?.message ?? String(err ?? '');
   const lower = message.toLowerCase();
   if (lower.includes('failed to fetch')) return true;
+  if (lower === 'fetch failed' || lower === 'terminated') return true;
   if (lower.includes('networkerror')) return true;
   if (lower.includes('network error')) return true;
   if (lower.includes('load failed')) return true;
@@ -95,6 +105,9 @@ export interface UserFacingError {
  *   surfaced as the primary message.
  */
 export function toUserFacingError(err: unknown): UserFacingError {
+  if (err instanceof GuardianTransportError) {
+    return { category: classifyTransportError(err.cause), userMessage: CONNECTIVITY_MESSAGE, cause: err };
+  }
   if (err instanceof GuardianHttpError) {
     if (err.code && err.userMessage) {
       return { code: err.code, userMessage: err.userMessage, cause: err };
@@ -108,4 +121,18 @@ export function toUserFacingError(err: unknown): UserFacingError {
     return { category: classifyTransportError(err), userMessage: CONNECTIVITY_MESSAGE, cause: err };
   }
   return { userMessage: GENERIC_MESSAGE, cause: err };
+}
+
+/**
+ * Whether a failed Guardian call means the server could not be reached, as
+ * opposed to answering with a refusal. A caller that has a guardian-free
+ * fallback may only take it when this is true - a guardian that answered may
+ * already have applied the request. A codeless 5xx counts: a gateway in front of
+ * a dead CVM answers with its own body, so something replied but not the guardian.
+ */
+export function isGuardianUnreachable(error: unknown): boolean {
+  if (error instanceof GuardianTransportError) {
+    return true;
+  }
+  return error instanceof GuardianHttpError && !error.code && error.status >= 500;
 }

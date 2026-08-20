@@ -117,6 +117,21 @@ function parseGuardianErrorBody(body: string): ParsedGuardianError | undefined {
  * Error thrown by the GUARDIAN HTTP client. Parses the `{ code, message, meta }`
  * error body (feature 009): branch on {@link code}, display {@link userMessage}.
  */
+/**
+ * The request never got an answer: DNS, TLS, a refused or dropped connection, an
+ * abort. Raised where the failure happens so no consumer has to infer transport
+ * from a runtime's error text, which differs across browsers, undici and Deno.
+ */
+export class GuardianTransportError extends Error {
+  readonly url: string;
+
+  constructor(url: string, cause: unknown) {
+    super(`Could not reach Guardian at ${url}`, { cause });
+    this.name = 'GuardianTransportError';
+    this.url = url;
+  }
+}
+
 export class GuardianHttpError extends Error {
   /**
    * Typed, compiler-checked Guardian error code (issue #318), normalized to
@@ -454,13 +469,18 @@ export class GuardianHttpClient {
 
   private async fetch(path: string, init: RequestInit): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
-    const response = await fetch(url, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        ...init.headers,
-      },
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          ...init.headers,
+        },
+      });
+    } catch (error) {
+      throw new GuardianTransportError(url, error);
+    }
 
     if (!response.ok) {
       const body = await response.text();

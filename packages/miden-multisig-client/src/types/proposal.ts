@@ -115,6 +115,11 @@ export type ProposalMetadata =
   | P2IdProposalMetadata
   | CustomProposalMetadata;
 
+/** Only switch_guardian is authorized by the signers alone; every other type needs the guardian's ack. */
+export function supportsOfflineExecution(proposalType: ProposalType): boolean {
+  return proposalType === 'switch_guardian';
+}
+
 export interface Proposal {
   id: string;
   accountId: string;

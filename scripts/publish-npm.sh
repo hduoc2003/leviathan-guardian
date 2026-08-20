@@ -46,6 +46,14 @@ if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
   exit 1
 fi
 
+# A published version names a commit, so that commit has to be one other people
+# can fetch. Without this an amend after publishing strands the version. A dry
+# run publishes nothing, so it is exempt.
+if [ "$DRY_RUN" -eq 0 ] && [ -z "$(git -C "$REPO_ROOT" branch -r --contains HEAD)" ]; then
+  echo "HEAD is not on any remote; push before publishing" >&2
+  exit 1
+fi
+
 SHA="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
 declare -A VERSIONS
 
@@ -111,10 +119,16 @@ for package in "${PACKAGES[@]}"; do
 
   if [ "$DRY_RUN" -eq 1 ]; then
     (cd "$package_dir" && npm publish --registry="$REGISTRY" --dry-run)
-  elif npm view "$name@$version" version --registry="$REGISTRY" > /dev/null 2>&1; then
+  elif view_output="$(npm view "$name@$version" version --registry="$REGISTRY" 2>&1)"; then
     # Already up there, so a run retried after a mid-publish failure finishes
     # the remaining packages instead of dying on a duplicate version.
     echo "skipped $package@$version (already published)"
+  elif ! grep -q 'E404' <<< "$view_output"; then
+    # Anything other than "no such version" means the registry did not answer,
+    # which must not be mistaken for "safe to publish".
+    echo "$view_output" >&2
+    echo "could not query the registry for $name@$version" >&2
+    exit 1
   else
     (cd "$package_dir" && npm publish --registry="$REGISTRY")
     echo "published $package@$version"

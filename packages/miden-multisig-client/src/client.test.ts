@@ -110,6 +110,24 @@ describe('MultisigClient', () => {
       expect(webClient.accounts.insert).toHaveBeenCalledWith({ account, overwrite: true });
     });
 
+    it('normalizes an account id that is not already 0x-hex', async () => {
+      const account: any = {
+        id: () => ({
+          toString: () => 'mtst1qabcdef',
+          prefix: () => ({ asInt: () => BigInt(1) }),
+          suffix: () => ({ asInt: () => BigInt(0xab00) }),
+        }),
+        serialize: () => new Uint8Array([1, 2, 3]),
+      };
+
+      const client = new MultisigClient(webClient, CLIENT_CONFIG);
+      const multisig = await client.loadFromAccount(account, mockSigner);
+
+      // prefix padded to 16 hex chars, suffix padded to 16 then trimmed to 14:
+      // the trim drops the suffix's low byte, which on a real Miden id is zero.
+      expect(multisig.accountId).toBe('0x' + '0'.repeat(15) + '1' + '0'.repeat(12) + 'ab');
+    });
+
     it('does not re-insert an account the client already holds', async () => {
       const accountId = '0x' + 'd'.repeat(30);
       const account: any = {

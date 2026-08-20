@@ -5,7 +5,7 @@
  * for proposal management.
  */
 
-import { GuardianHttpClient, type AbandonCandidateResponse, type AbandonStatus, type DeltaObject, type ProposalSignature, type Signer, type AuthConfig, type StateObject } from '@openzeppelin/guardian-client';
+import { GuardianHttpClient, type AbandonCandidateResponse, type AbandonStatus, type DeltaObject, type DeltaProposalRequest, type DeltaProposalResponse, type ProposalSignature, type Signer, type AuthConfig, type StateObject } from '@openzeppelin/guardian-client';
 import type {
   ConsumableNote,
   ExportedProposal,
@@ -16,6 +16,7 @@ import type {
   ProposalSignatureEntry,
   ProposalType,
 } from './types.js';
+import { supportsOfflineExecution } from './types/proposal.js';
 import type { ProcedureName } from './procedures.js';
 import type {
   MidenClient,
@@ -74,6 +75,7 @@ import {
 } from './utils/signature.js';
 import { computeCommitmentFromTxSummary, accountIdToHex } from './multisig/helpers.js';
 import { buildGuardianSignatureFromSigner } from './multisig/signing.js';
+import { isGuardianUnreachable } from './connectivity.js';
 import { AccountInspector } from './inspector.js';
 import { ProposalFactory } from './proposal/factory.js';
 import { ProposalMetadataCodec } from './proposal/metadata.js';
@@ -576,18 +578,33 @@ export class Multisig {
    * @param metadata - Optional metadata for execution (target config, salt, etc.)
    */
   async createProposal(nonce: number, txSummaryBase64: string, metadata: ProposalMetadata): Promise<Proposal> {
-    const guardianMetadata = ProposalMetadataCodec.toGuardian(metadata);
+    const response = await this.guardian.pushDeltaProposal(
+      this.buildDeltaProposalRequest(nonce, txSummaryBase64, metadata),
+    );
 
-    const response = await this.guardian.pushDeltaProposal({
+    return this.materializePushedProposal(response, metadata);
+  }
+
+  private buildDeltaProposalRequest(
+    nonce: number,
+    txSummaryBase64: string,
+    metadata: ProposalMetadata,
+  ): DeltaProposalRequest {
+    return {
       accountId: this._accountId,
       nonce,
       deltaPayload: {
         txSummary: { data: txSummaryBase64 },
         signatures: [],
-        metadata: guardianMetadata,
+        metadata: ProposalMetadataCodec.toGuardian(metadata),
       },
-    });
+    };
+  }
 
+  private async materializePushedProposal(
+    response: DeltaProposalResponse,
+    metadata: ProposalMetadata,
+  ): Promise<Proposal> {
     const proposal = this.proposalFactory().fromDelta(response.delta, response.commitment, metadata);
     await this.verifyProposalMetadataBinding(proposal);
     this.proposals.set(proposal.id, proposal);
@@ -805,13 +822,9 @@ export class Multisig {
   }
 
   /**
-   * Same proposal as {@link createSwitchGuardianProposal}, kept out of the
-   * guardian store. Use it when the guardian being replaced is unreachable,
-   * which is the one case a switch still has to work in: switch_guardian is
-   * authorized by the signers alone and never asks that guardian to ack. The
-   * caller then carries the proposal to its cosigners itself, via
-   * {@link exportProposalToJson} / {@link importProposal} and
-   * {@link signProposalOffline}.
+   * {@link createSwitchGuardianProposal} kept off the guardian being replaced,
+   * for when it is unreachable. The caller carries the proposal to its
+   * cosigners itself, via {@link exportProposalToJson} / {@link importProposal}.
    */
   async createSwitchGuardianProposalOffline(
     newGuardianEndpoint: string,
@@ -824,14 +837,27 @@ export class Multisig {
       nonce,
     );
 
+    return this.storeOfflineSwitchProposal({ summaryBase64, metadata, proposalNonce });
+  }
+
+  private async guardianAnswers(): Promise<boolean> {
+    try {
+      await this.guardian.getPubkey();
+      return true;
+    } catch (error) {
+      return !isGuardianUnreachable(error);
+    }
+  }
+
+  private async storeOfflineSwitchProposal(built: BuiltProposal): Promise<Proposal> {
     const proposal: Proposal = {
-      id: normalizeHexWord(computeCommitmentFromTxSummary(summaryBase64)),
+      id: normalizeHexWord(computeCommitmentFromTxSummary(built.summaryBase64)),
       accountId: this._accountId,
-      nonce: proposalNonce,
+      nonce: built.proposalNonce,
       status: 'pending',
-      txSummary: summaryBase64,
+      txSummary: built.summaryBase64,
       signatures: [],
-      metadata: ProposalMetadataCodec.validate(metadata),
+      metadata: ProposalMetadataCodec.validate(built.metadata),
     };
     await this.verifyProposalMetadataBinding(proposal);
     this.proposals.set(proposal.id, proposal);
@@ -839,11 +865,63 @@ export class Multisig {
     return proposal;
   }
 
+  /**
+   * Online, falling back to offline only when the guardian cannot be reached.
+   * The returned mode picks the execute method: `online` pairs with
+   * {@link executeProposal}, `offline` with {@link executeProposalOffline}.
+   */
+  async createSwitchGuardianProposalWithFallback(
+    newGuardianEndpoint: string,
+    newGuardianPubkey: string,
+    nonce?: number,
+  ): Promise<{ proposal: Proposal; mode: 'online' | 'offline' }> {
+    const built = await this.buildSwitchGuardianProposal(
+      newGuardianEndpoint,
+      newGuardianPubkey,
+      nonce,
+    );
+
+    const request = this.buildDeltaProposalRequest(
+      built.proposalNonce,
+      built.summaryBase64,
+      built.metadata,
+    );
+
+    const response = await this.pushOrDetectUnreachable(request);
+    if (response === undefined) {
+      return { proposal: await this.storeOfflineSwitchProposal(built), mode: 'offline' };
+    }
+
+    return {
+      proposal: await this.materializePushedProposal(response, built.metadata),
+      mode: 'online',
+    };
+  }
+
+  /**
+   * Pushes, or returns `undefined` once the classifier and a liveness probe
+   * agree the guardian is gone. The guarded call is this method's whole body, so
+   * the scope cannot quietly grow to cover work that is not a network call -
+   * the mistake this fallback was rewritten for several times.
+   */
+  private async pushOrDetectUnreachable(
+    request: DeltaProposalRequest,
+  ): Promise<DeltaProposalResponse | undefined> {
+    try {
+      return await this.guardian.pushDeltaProposal(request);
+    } catch (error) {
+      if (!isGuardianUnreachable(error) || (await this.guardianAnswers())) {
+        throw error;
+      }
+      return undefined;
+    }
+  }
+
   private async buildSwitchGuardianProposal(
     newGuardianEndpoint: string,
     newGuardianPubkey: string,
     nonce?: number,
-  ): Promise<{ summaryBase64: string; metadata: ProposalMetadata; proposalNonce: number }> {
+  ): Promise<BuiltProposal> {
     const webClient = await this.getRawClient();
     await this.verifyGuardianEndpointCommitment(newGuardianEndpoint, newGuardianPubkey);
 
@@ -1272,6 +1350,29 @@ export class Multisig {
    * @param proposalId - The proposal commitment/ID
    */
   async executeProposal(proposalId: string): Promise<void> {
+    return this.runProposalExecution(proposalId, 'online');
+  }
+
+  /**
+   * Executes a proposal built with {@link createSwitchGuardianProposalOffline}.
+   * Skips the pre-switch release, which that guardian could not serve anyway,
+   * and refuses any other type before execution can reach the guardian for it.
+   */
+  async executeProposalOffline(proposalId: string): Promise<void> {
+    const local = this.getLocalProposal(proposalId);
+    if (local && !supportsOfflineExecution(local.metadata.proposalType)) {
+      throw new Error(
+        `Offline execution supports switch_guardian only; got '${local.metadata.proposalType}'`,
+      );
+    }
+
+    return this.runProposalExecution(proposalId, 'offline');
+  }
+
+  private async runProposalExecution(
+    proposalId: string,
+    mode: 'online' | 'offline',
+  ): Promise<void> {
     const { metadata, finalRequest, proposal } = await this.prepareProposalExecution(proposalId);
 
     const accountId = AccountId.fromHex(this._accountId);
@@ -1286,25 +1387,27 @@ export class Multisig {
       // pending proposal). Must run before `this.guardian` is repointed below.
       // Best-effort: an unreachable old GUARDIAN must not block the switch, so
       // errors are swallowed (mirrors the Rust execute path).
-      try {
+      if (mode === 'online') {
         const normalizedProposalId = normalizeHexWord(proposal.id);
-        const switchDelta = await this.guardian.getDeltaProposal(
-          this._accountId,
-          normalizedProposalId,
-        );
-        await this.guardian.pushDelta({
-          ...switchDelta,
-          deltaPayload: switchDelta.deltaPayload.txSummary,
-        });
-      } catch (error) {
-        // Best-effort - see above - but the failure must be visible: a
-        // silently lost push leaves the pre-switch GUARDIAN serving this
-        // account (split-brain, issue #305) with nothing to diagnose by.
-        console.warn(
-          'SwitchGuardian delta push to the pre-switch GUARDIAN failed; it ' +
-            'will keep serving this account until reconciliation',
-          error,
-        );
+        try {
+          const switchDelta = await this.guardian.getDeltaProposal(
+            this._accountId,
+            normalizedProposalId,
+          );
+          await this.guardian.pushDelta({
+            ...switchDelta,
+            deltaPayload: switchDelta.deltaPayload.txSummary,
+          });
+        } catch (error) {
+          // Best-effort - see above - but the failure must be visible: a
+          // silently lost push leaves the pre-switch GUARDIAN serving this
+          // account (split-brain, issue #305) with nothing to diagnose by.
+          console.warn(
+            'SwitchGuardian delta push to the pre-switch GUARDIAN failed; it ' +
+              'will keep serving this account until reconciliation',
+            error,
+          );
+        }
       }
 
       try {
@@ -1759,7 +1862,7 @@ export class Multisig {
    * @returns JSON string that can be shared and imported by other signers
    */
   exportProposalToJson(proposalId: string): string {
-    const proposal = this.proposals.get(proposalId);
+    const proposal = this.getLocalProposal(proposalId);
     if (!proposal) {
       throw new Error(`Proposal not found in local cache: ${proposalId}`);
     }
@@ -1809,8 +1912,7 @@ export class Multisig {
    * @returns Updated JSON string with the new signature included
    */
   async signProposalOffline(proposalId: string): Promise<string> {
-    const normalizedProposalId = normalizeHexWord(proposalId);
-    const proposal = this.proposals.get(proposalId) ?? this.proposals.get(normalizedProposalId);
+    const proposal = this.getLocalProposal(proposalId);
     if (!proposal) {
       throw new Error(`Proposal not found: ${proposalId}`);
     }
@@ -2018,3 +2120,11 @@ export class Multisig {
   }
 
 }
+
+/** A proposal assembled locally, before it is either pushed or stored offline. */
+interface BuiltProposal {
+  summaryBase64: string;
+  metadata: ProposalMetadata;
+  proposalNonce: number;
+}
+

@@ -1,4 +1,4 @@
-export { GuardianHttpClient, GuardianHttpError } from './http.js';
+export { GuardianHttpClient, GuardianHttpError, GuardianTransportError } from './http.js';
 export type { GuardianErrorMeta } from './http.js';
 export {
   GUARDIAN_ERROR_CODES,

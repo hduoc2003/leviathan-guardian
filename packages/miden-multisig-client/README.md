@@ -252,6 +252,41 @@ if (proposal.status === 'ready') {
 }
 ```
 
+### Switch to a Different Guardian
+
+`switch_guardian` is the one operation that must work while the guardian being
+replaced is unreachable, since that is often why you are leaving it. Let the
+client pick the path and pass the mode on:
+
+```typescript
+const { proposal, mode } = await multisig.createSwitchGuardianProposalWithFallback(
+  newGuardianEndpoint,
+  newGuardianPubkey,
+);
+
+if (mode === 'offline') {
+  // Cosigners are reached directly, not through the guardian: send each of them
+  // this JSON and import what they return, until the threshold is met.
+  let json = await multisig.signProposalOffline(proposal.id);
+  for (const cosigner of cosigners) {   // your transport, not part of the SDK
+    json = await cosigner.signExported(json);
+    await multisig.importProposal(json);
+  }
+  await multisig.executeProposalOffline(proposal.id);
+} else {
+  await multisig.signProposal(proposal.id);
+  await multisig.executeProposal(proposal.id);
+}
+```
+
+`executeProposal` ends by releasing the previous guardian so it stops serving the
+account; an offline proposal was never sent there, so `executeProposalOffline`
+skips that step and refuses any proposal type other than `switch_guardian`.
+
+Build the client with `loadFromAccount(account, signer)` rather than
+`load(accountId, signer)` for this flow: `load` fetches the account from the
+guardian you are leaving.
+
 ### Export Proposal for Offline Signing
 
 ```typescript

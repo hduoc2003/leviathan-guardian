@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { GuardianHttpError } from '@openzeppelin/guardian-client';
-import { isLikelyNetworkError, toUserFacingError } from './connectivity.js';
+import { GuardianHttpError, GuardianTransportError } from '@openzeppelin/guardian-client';
+import { isGuardianUnreachable, isLikelyNetworkError, toUserFacingError } from './connectivity.js';
 
 describe('isLikelyNetworkError', () => {
   it('flags codeless transport failures', () => {
@@ -53,6 +53,36 @@ describe('toUserFacingError', () => {
     }
   });
 
+  it.each([
+    ['a refused connection', 'fetch failed'],
+    ['a socket that died mid-response', 'terminated'],
+  ])('classifies undici %s', (label, message) => {
+    const result = toUserFacingError(new TypeError(message));
+
+    expect(result.category).toBe('unreachable');
+    expect(result.userMessage).toContain("Can't reach Guardian");
+  });
+
+  it('does not read a worker OOM as connectivity', () => {
+    const err = new Error('Worker terminated due to reaching memory limit: JS heap out of memory');
+
+    expect(toUserFacingError(err).category).toBeUndefined();
+  });
+
+  it('does not read a semantic failure as connectivity because of its cause', () => {
+    const err = new Error('Guardian rejected the proposal: commitment mismatch');
+    (err as { cause?: unknown }).cause = new Error('socket connection re-established');
+
+    expect(toUserFacingError(err).category).toBeUndefined();
+  });
+
+  it('survives a self-referencing cause chain', () => {
+    const err = new Error('boom') as Error & { cause?: unknown };
+    err.cause = err;
+
+    expect(() => toUserFacingError(err)).not.toThrow();
+  });
+
   it('treats a reachable proxy 5xx with no Guardian body as connectivity', () => {
     const result = toUserFacingError(new GuardianHttpError(502, 'Bad Gateway', '<html>nope</html>'));
     expect(result.category).toBe('unreachable');
@@ -63,5 +93,29 @@ describe('toUserFacingError', () => {
     const result = toUserFacingError(new Error('totally unexpected'));
     expect(result.userMessage).toBe('Something went wrong. Please try again.');
     expect(result.userMessage).not.toContain('totally unexpected');
+  });
+});
+
+describe('isGuardianUnreachable', () => {
+  it.each([
+    ['a transport failure the client raised', new GuardianTransportError('http://g', new TypeError('Failed to fetch'))],
+    ['a codeless gateway 502', new GuardianHttpError(502, 'Bad Gateway', '<html>nope</html>')],
+  ])('is true for %s', (label, error) => {
+    expect(isGuardianUnreachable(error)).toBe(true);
+  });
+
+  it('is false for a bare transport error, which cannot have come from the client', () => {
+    // GuardianHttpClient wraps every fetch rejection, so a loose TypeError here
+    // is some other bug and must not be mistaken for the guardian being down.
+    expect(isGuardianUnreachable(new TypeError('Failed to fetch'))).toBe(false);
+  });
+
+  it.each([
+    ['a rate limit the guardian itself sent', new GuardianHttpError(429, 'Too Many Requests', '{"code":"rate_limited","message":"slow down","meta":{"retryable":true}}')],
+    ['a conflict', new GuardianHttpError(409, 'Conflict', '{"error":"conflict"}')],
+    ['a response this client could not decode', new TypeError("Cannot read properties of undefined (reading 'account_id')")],
+    ['a rate limit with no envelope', new GuardianHttpError(429, 'Too Many Requests', 'slow down')],
+  ])('is false for %s, which means the guardian answered', (label, error) => {
+    expect(isGuardianUnreachable(error)).toBe(false);
   });
 });

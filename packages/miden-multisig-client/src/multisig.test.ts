@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Multisig } from './multisig.js';
-import { GuardianHttpClient, type Signer } from '@openzeppelin/guardian-client';
+import { GuardianHttpClient, GuardianHttpError, type Signer } from '@openzeppelin/guardian-client';
 import {
   buildUpdateProcedureThresholdTransactionRequest,
   buildUpdateGuardianTransactionRequest,
@@ -1649,6 +1649,250 @@ describe('Multisig', () => {
   });
 
   describe('createSwitchGuardianProposal', () => {
+    const buildFallbackMultisig = () =>
+      createTestMultisig({
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      });
+
+    it('finds an offline proposal by a non-normalized id', async () => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as any);
+      const multisig = buildFallbackMultisig();
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: newGuardianPubkey }),
+      });
+      mockFetch.mockImplementation(() => {
+        throw new Error('the guardian being replaced must not be contacted');
+      });
+
+      const proposal = await multisig.createSwitchGuardianProposalOffline(
+        'http://new-guardian.com',
+        newGuardianPubkey,
+      );
+      const upperCased = '0x' + proposal.id.slice(2).toUpperCase();
+
+      expect(() => multisig.exportProposalToJson(upperCased)).not.toThrow();
+      await expect(multisig.signProposalOffline(upperCased)).resolves.toBeTypeOf('string');
+    });
+
+    it('falls back to the offline builder when the guardian is unreachable', async () => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as any);
+      const multisig = buildFallbackMultisig();
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+
+      mockFetch.mockImplementation((url: string) => {
+        if (String(url).includes('localhost:3000')) {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return Promise.resolve({ ok: true, json: async () => ({ commitment: newGuardianPubkey }) });
+      });
+
+      const result = await multisig.createSwitchGuardianProposalWithFallback(
+        'http://new-guardian.com',
+        newGuardianPubkey,
+      );
+
+      expect(result.mode).toBe('offline');
+      expect(result.proposal.signatures).toEqual([]);
+    });
+
+    it('stays online when the guardian answers', async () => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as any);
+      const multisig = buildFallbackMultisig();
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: newGuardianPubkey }),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          delta: {
+            account_id: multisig.accountId,
+            nonce: 1,
+            prev_commitment: '0x' + 'b'.repeat(64),
+            delta_payload: {
+              tx_summary: { data: 'AQID' },
+              signatures: [],
+              metadata: {
+                proposal_type: 'switch_guardian',
+                new_guardian_pubkey: newGuardianPubkey,
+                new_guardian_endpoint: 'http://new-guardian.com',
+              },
+            },
+            status: {
+              status: 'pending',
+              timestamp: '2024-01-01T00:00:00Z',
+              proposer_id: mockSigner.commitment,
+              cosigner_sigs: [],
+            },
+          },
+          commitment: '0x' + 'c'.repeat(64),
+        }),
+      });
+
+      const result = await multisig.createSwitchGuardianProposalWithFallback(
+        'http://new-guardian.com',
+        newGuardianPubkey,
+        42,
+      );
+
+      expect(result.mode).toBe('online');
+      // The fallback builds its own request rather than calling createProposal,
+      // so pin what it sends: this is the online path the plan forbids changing.
+      const push = mockFetch.mock.calls.find(call => String(call[0]).includes('/delta/proposal'));
+      const pushed = JSON.parse(String(push?.[1].body));
+      expect(pushed.account_id).toBe(multisig.accountId);
+      expect(pushed.nonce).toBe(42);
+      expect(pushed.delta_payload.metadata.proposal_type).toBe('switch_guardian');
+      expect(pushed.delta_payload.tx_summary.data).toBe('AQID');
+      expect(pushed.delta_payload.metadata.new_guardian_endpoint).toBe('http://new-guardian.com');
+    });
+
+    it('does not fall back when the guardian rejects the proposal on its merits', async () => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as any);
+      const multisig = buildFallbackMultisig();
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: newGuardianPubkey }),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ error: 'conflict' }),
+      });
+
+      await expect(
+        multisig.createSwitchGuardianProposalWithFallback(
+          'http://new-guardian.com',
+          newGuardianPubkey,
+        ),
+      ).rejects.toBeInstanceOf(GuardianHttpError);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect((multisig as any).proposals.size).toBe(0);
+    });
+
+    it('does not fall back when the push failed but the guardian is still answering', async () => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as any);
+      const multisig = buildFallbackMultisig();
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: newGuardianPubkey }),
+      });
+      // The push looks like a lost connection but the guardian answers the probe:
+      // it may already hold the proposal, so a fallback would duplicate it.
+      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: '0x' + 'c'.repeat(64) }),
+      });
+
+      await expect(
+        multisig.createSwitchGuardianProposalWithFallback(
+          'http://new-guardian.com',
+          newGuardianPubkey,
+        ),
+      ).rejects.toThrow();
+      expect((multisig as any).proposals.size).toBe(0);
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('falls back when a gateway answers 502 for a dead guardian', async () => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as any);
+      const multisig = buildFallbackMultisig();
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+
+      mockFetch.mockImplementation((url: string) => {
+        if (String(url).includes('new-guardian.com')) {
+          return Promise.resolve({ ok: true, json: async () => ({ commitment: newGuardianPubkey }) });
+        }
+        // A dead CVM behind the dstack gateway looks like this, not like a
+        // refused connection.
+        return Promise.resolve({
+          ok: false,
+          status: 502,
+          statusText: 'Bad Gateway',
+          headers: { get: () => null },
+          text: async () => '<html>nope</html>',
+        });
+      });
+
+      const result = await multisig.createSwitchGuardianProposalWithFallback(
+        'http://new-guardian.com',
+        newGuardianPubkey,
+      );
+
+      expect(result.mode).toBe('offline');
+    });
+
+    it('does not fall back when the push landed but the response was unusable', async () => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as any);
+      const multisig = buildFallbackMultisig();
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: newGuardianPubkey }),
+      });
+      // The guardian stored the proposal and answered 200 with a body this
+      // client cannot read; falling back would leave a copy on both sides.
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+      await expect(
+        multisig.createSwitchGuardianProposalWithFallback(
+          'http://new-guardian.com',
+          newGuardianPubkey,
+        ),
+      ).rejects.toThrow();
+      expect((multisig as any).proposals.size).toBe(0);
+      // No probe: an unreadable body is not a connectivity failure, so the
+      // classifier rules out the fallback without asking.
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not fall back when the NEW guardian is the unreachable one', async () => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as any);
+      const multisig = buildFallbackMultisig();
+
+      // Both hosts dead: nothing may be built against a new endpoint that was
+      // never verified, whatever the old guardian is doing.
+      mockFetch.mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
+
+      await expect(
+        multisig.createSwitchGuardianProposalWithFallback(
+          'http://new-guardian.com',
+          '0x' + '9'.repeat(64),
+        ),
+      ).rejects.toThrow('Could not reach Guardian');
+      expect((multisig as any).proposals.size).toBe(0);
+    });
+
     it('should verify new endpoint commitment before creating proposal', async () => {
       vi.mocked(executeForSummary).mockResolvedValue({
         serialize: () => new Uint8Array([1, 2, 3]),
@@ -3056,6 +3300,139 @@ describe('Multisig', () => {
   });
 
   describe('executeProposal', () => {
+    const NEW_GUARDIAN_ENDPOINT = 'http://new-guardian.com';
+    const OLD_GUARDIAN_HOST = 'localhost:3000';
+
+    const switchProposalFixture = (multisig: any, proposalId: string, newGuardianPubkey: string) =>
+      multisig.proposals.set(proposalId, {
+        id: proposalId,
+        accountId: multisig.accountId,
+        nonce: 1,
+        status: 'ready',
+        txSummary: 'AQID',
+        signatures: [
+          {
+            signerId: mockSigner.commitment,
+            signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
+            timestamp: '2024-01-01T00:00:00Z',
+          },
+        ],
+        metadata: {
+          proposalType: 'switch_guardian',
+          newGuardianPubkey,
+          newGuardianEndpoint: NEW_GUARDIAN_ENDPOINT,
+          description: '',
+        },
+      });
+
+    it('executes an offline switch without calling the guardian being replaced', async () => {
+      const multisig = createTestMultisig({
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      });
+      const proposalId = '0x' + 'c'.repeat(64);
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+      switchProposalFixture(multisig, proposalId, newGuardianPubkey);
+
+      mockFetch.mockImplementation((url: string) => {
+        if (String(url).includes(OLD_GUARDIAN_HOST)) {
+          throw new Error('the guardian being replaced must not be contacted');
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            commitment: newGuardianPubkey,
+            success: true,
+            message: 'ok',
+            ack_pubkey: '0x' + 'f'.repeat(64),
+          }),
+        });
+      });
+      mockWebClient.getAccount.mockResolvedValueOnce({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      });
+
+      await expect(multisig.executeProposalOffline(proposalId)).resolves.toBeUndefined();
+
+      const hosts = mockFetch.mock.calls.map(call => String(call[0]));
+      expect(hosts.every(host => !host.includes(OLD_GUARDIAN_HOST))).toBe(true);
+      expect(hosts.some(host => host.includes(NEW_GUARDIAN_ENDPOINT))).toBe(true);
+    });
+
+    it('still switches GUARDIAN when the pre-switch release fails', async () => {
+      const multisig = createTestMultisig({
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      });
+      const proposalId = '0x' + 'c'.repeat(64);
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+      switchProposalFixture(multisig, proposalId, newGuardianPubkey);
+
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      mockFetch.mockImplementation((url: string) => {
+        if (String(url).includes(OLD_GUARDIAN_HOST)) {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            commitment: newGuardianPubkey,
+            success: true,
+            message: 'ok',
+            ack_pubkey: '0x' + 'f'.repeat(64),
+          }),
+        });
+      });
+      mockWebClient.getAccount.mockResolvedValueOnce({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      });
+
+      await expect(multisig.executeProposal(proposalId)).resolves.toBeUndefined();
+
+      const hosts = mockFetch.mock.calls.map(call => String(call[0]));
+      expect(hosts.some(host => host.includes(OLD_GUARDIAN_HOST))).toBe(true);
+      expect(hosts.some(host => host.includes(NEW_GUARDIAN_ENDPOINT))).toBe(true);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('pre-switch GUARDIAN'),
+        expect.any(Error),
+      );
+      expect(mockWebClient.submitProvenTransaction).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
+    });
+
+    it('refuses offline execution for a proposal type it does not support', async () => {
+      const multisig = createTestMultisig({
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      });
+      // Must be a proposal that would otherwise execute: the id matches the
+      // summary commitment and the threshold is met, so only the guard stops it.
+      const proposalId = '0x' + 'c'.repeat(64);
+      (multisig as any).proposals.set(proposalId, {
+        id: proposalId,
+        accountId: multisig.accountId,
+        nonce: 1,
+        status: 'ready',
+        txSummary: 'AQID',
+        signatures: [
+          {
+            signerId: mockSigner.commitment,
+            signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
+            timestamp: '2024-01-01T00:00:00Z',
+          },
+        ],
+        metadata: { proposalType: 'p2id', description: '' },
+      });
+
+      await expect(multisig.executeProposalOffline(proposalId)).rejects.toThrow(
+        'supports switch_guardian only',
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
     it('should throw if proposal not found locally', async () => {
       const config = {
         threshold: 1,

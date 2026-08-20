@@ -12,6 +12,7 @@ import { Multisig } from './multisig.js';
 import { createMultisigAccount } from './account/index.js';
 import { AccountInspector } from './inspector.js';
 import { getRawMidenClient, requireConfigValue, requireMidenRpcEndpoint } from './raw-client.js';
+import { accountIdToHex } from './multisig/helpers.js';
 import type { MultisigConfig, Signer } from './types.js';
 import {
   resolveProverConfig,
@@ -217,15 +218,13 @@ export class MultisigClient {
   }
 
   /**
-   * Build the multisig from an account the caller already holds, skipping the
-   * guardian round-trip that {@link load} makes. switch_guardian has to work
-   * while the guardian being replaced is unreachable; every other operation
-   * needs that guardian alive anyway, so they keep using `load`.
+   * {@link load} without the guardian round-trip, for a caller that already
+   * holds the account and may be leaving an unreachable guardian.
    */
   async loadFromAccount(account: Account, signer: Signer): Promise<Multisig> {
     this._guardianClient.setSigner(signer);
 
-    return this.buildMultisig(account, account.id().toString(), signer);
+    return this.buildMultisig(account, accountIdToHex(account), signer);
   }
 
   private async buildMultisig(
