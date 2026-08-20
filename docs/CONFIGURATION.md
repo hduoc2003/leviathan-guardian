@@ -147,9 +147,10 @@ before. Routing/index fields (account id, nonce, commitments, status, timestamps
 always stay plaintext.
 
 **Which variable do I set?** Choose **one key source** — the dev key for local
-work, or the Secrets Manager secret for production. You never set both (doing so
-is a startup error). `GUARDIAN_STORAGE_ENCRYPTION_KEY_ID` is **not** a key — it is
-an optional label, and most users leave it unset.
+work, the Secrets Manager secret for an AWS deployment, or the dstack path when
+running inside a confidential VM. Setting more than one is a startup error.
+`GUARDIAN_STORAGE_ENCRYPTION_KEY_ID` is **not** a key - it is an optional label,
+and most users leave it unset.
 
 **Key sources** (set exactly one; presence is what turns encryption on):
 
@@ -157,6 +158,7 @@ an optional label, and most users leave it unset.
 |---|---|---|
 | `GUARDIAN_STORAGE_ENCRYPTION_KEY` | _unset_ | **Dev key source.** The actual 32-byte key, base64-encoded (`openssl rand -base64 32`). |
 | `GUARDIAN_STORAGE_ENCRYPTION_KEY_SECRET_ID` | _unset_ | **Prod key source.** AWS Secrets Manager name/ARN of a secret holding a structured `{ "active": kid, "keys": { kid: base64-32-bytes } }` document (one or more keys). Reuses `AWS_REGION`. |
+| `GUARDIAN_STORAGE_ENCRYPTION_DSTACK_PATH` | _unset_ | **Confidential-VM key source.** Derivation path handed to the dstack guest agent on `/var/run/dstack.sock`; the key is derived by the platform, bound to the application's on-chain identity, and never exists as a value the operator can read. The `kid` recorded on each record is `dstack:<path>`, so rotating means deriving at a new path. Requires the `tee` build feature - a binary built without it refuses to start rather than storing plaintext. See `deploy/phala/README.md`. |
 
 **Optional label:**
 
@@ -170,8 +172,8 @@ and rotate them (add a new key, repoint `active`, keep the old key so existing
 records still decrypt). The dev key source holds a single key, so it cannot do
 multi-key rotation reads; that is a production capability.
 
-Rules: configure **exactly one** key source (both set → startup error). When a key
-source is set the server validates it at startup and fails fast on a
+Rules: configure **exactly one** key source (more than one → startup error). When
+a key source is set the server validates it at startup and fails fast on a
 missing/malformed/wrong-length key — it never silently falls back to plaintext.
 Encryption is fixed for a populated store: the server records a marker on the
 first encrypted write and refuses to mix plaintext and ciphertext, so enable it

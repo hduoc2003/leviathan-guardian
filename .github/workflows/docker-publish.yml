@@ -24,6 +24,11 @@ on:
         type: boolean
         required: false
         default: false
+      platforms:
+        description: "Target platforms (Phala TDX is amd64 only; arm64 builds through QEMU and is slow)"
+        type: string
+        required: false
+        default: linux/amd64
 
 permissions:
   contents: read
@@ -35,14 +40,10 @@ concurrency:
   group: docker-publish
   cancel-in-progress: false
 
-env:
-  IMAGE: ghcr.io/openzeppelin/guardian
-
 jobs:
   publish:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    if: github.repository_owner == 'OpenZeppelin'
     environment: release
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -58,6 +59,7 @@ jobs:
           INPUT_BRANCH: ${{ inputs.branch }}
           INPUT_FEATURES: ${{ inputs.features }}
           INPUT_OVERWRITE: ${{ inputs.overwrite }}
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
           LAUNCH_REF: ${{ github.ref_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -66,18 +68,22 @@ jobs:
             ref="$RELEASE_TAG"
             features="postgres"
             overwrite="false"
+            platforms="linux/amd64,linux/arm64"
           else
             version="$INPUT_VERSION"
             ref="${INPUT_BRANCH:-$LAUNCH_REF}"
             features="${INPUT_FEATURES:-postgres}"
             overwrite="$INPUT_OVERWRITE"
+            platforms="${INPUT_PLATFORMS:-linux/amd64}"
           fi
           {
             echo "version=$version"
             echo "ref=$ref"
             echo "features=$features"
             echo "overwrite=$overwrite"
+            echo "platforms=$platforms"
           } >> "$GITHUB_OUTPUT"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/guardian" >> "$GITHUB_ENV"
 
       - name: Validate version input
         env:
@@ -159,11 +165,13 @@ jobs:
         with:
           context: .
           target: server-runner
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.params.outputs.platforms }}
           push: true
           build-args: |
             GUARDIAN_SERVER_FEATURES=${{ steps.params.outputs.features }}
             GUARDIAN_GIT_SHA=${{ steps.commit.outputs.short12 }}
+          secrets: |
+            gitea_token=${{ secrets.GITEA_TOKEN }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

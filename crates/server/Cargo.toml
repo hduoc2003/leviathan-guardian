@@ -20,6 +20,9 @@ aws-sdk-kms = { version = "=1.99.0", default-features = false, features = ["rt-t
 sha3 = "0.10"
 axum = "0.8.6"
 alloy = { version = "2.0.1", optional = true }
+# Optional: it pulls its own major version of the alloy stack for an `ethereum`
+# module guardian never calls, so non-TEE deployments must not carry it.
+dstack-sdk = { version = "0.1.3", optional = true }
 base64 = { workspace = true }
 bincode = "1.3"
 chrono = { version = "0.4", features = ["serde"] }
@@ -93,6 +96,7 @@ rcgen = "0.13"
 [features]
 default = []
 evm = ["alloy"]
+tee = ["dep:dstack-sdk"]
 authz-test-probe = []
 postgres = [
     "diesel",

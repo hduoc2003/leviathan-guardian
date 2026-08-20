@@ -15,9 +15,11 @@ use crate::secret::{CredentialUrl, SecretString};
 use crate::storage::StorageBackend;
 use crate::storage::encryption::cipher::{Aes256GcmCipher, StorageCipher};
 use crate::storage::encryption::decorator::EncryptedStorage;
+#[cfg(feature = "tee")]
+use crate::storage::encryption::dstack::{GuestAgentClient, load_dstack_provider};
 use crate::storage::encryption::key_provider::{
-    DEFAULT_KID, ENV_KEY, ENV_KEY_ID, ENV_SECRET_ID, InMemoryKeyProvider, KeyProviderError,
-    StorageKeyProvider,
+    DEFAULT_KID, ENV_DSTACK_PATH, ENV_KEY, ENV_KEY_ID, ENV_SECRET_ID, InMemoryKeyProvider,
+    KeyProviderError, StorageKeyProvider,
 };
 use crate::storage::encryption::marker::{MarkerStore, apply_startup_guard};
 #[cfg(not(feature = "postgres"))]
@@ -203,22 +205,61 @@ where
 }
 
 async fn resolve_storage_key_provider() -> Result<Option<Arc<dyn StorageKeyProvider>>, String> {
-    match (non_empty_env(ENV_KEY), non_empty_env(ENV_SECRET_ID)) {
-        (Some(_), Some(_)) => Err(KeyProviderError::MultipleKeySources.to_string()),
-        (Some(key), None) => {
-            let kid = non_empty_env(ENV_KEY_ID).unwrap_or_else(|| DEFAULT_KID.to_string());
-            let provider =
-                InMemoryKeyProvider::from_dev_key(&key, &kid).map_err(|e| e.to_string())?;
-            Ok(Some(Arc::new(provider)))
-        }
-        (None, Some(secret_id)) => {
-            let secret = fetch_secret_document(&secret_id).await?;
-            let provider = InMemoryKeyProvider::from_secret_json(secret.expose_secret())
-                .map_err(|e| e.to_string())?;
-            Ok(Some(Arc::new(provider)))
-        }
-        (None, None) => Ok(None),
+    let env_key = non_empty_env(ENV_KEY);
+    let secret_id = non_empty_env(ENV_SECRET_ID);
+    let dstack_path = non_empty_env(ENV_DSTACK_PATH);
+
+    let configured = [
+        env_key.is_some(),
+        secret_id.is_some(),
+        dstack_path.is_some(),
+    ]
+    .into_iter()
+    .filter(|set| *set)
+    .count();
+    if configured > 1 {
+        return Err(KeyProviderError::MultipleKeySources.to_string());
     }
+
+    if let Some(path) = dstack_path {
+        return resolve_dstack_provider(&path).await;
+    }
+    if let Some(key) = env_key {
+        let kid = non_empty_env(ENV_KEY_ID).unwrap_or_else(|| DEFAULT_KID.to_string());
+        let provider = InMemoryKeyProvider::from_dev_key(&key, &kid).map_err(|e| e.to_string())?;
+        return Ok(Some(Arc::new(provider)));
+    }
+    if let Some(secret_id) = secret_id {
+        let secret = fetch_secret_document(&secret_id).await?;
+        let provider = InMemoryKeyProvider::from_secret_json(secret.expose_secret())
+            .map_err(|e| e.to_string())?;
+        return Ok(Some(Arc::new(provider)));
+    }
+    Ok(None)
+}
+
+/// Derivation happens at startup rather than lazily so a missing guest agent or
+/// an unapproved compose hash stops the boot instead of the first write.
+#[cfg(feature = "tee")]
+async fn resolve_dstack_provider(
+    path: &str,
+) -> Result<Option<Arc<dyn StorageKeyProvider>>, String> {
+    let client = GuestAgentClient::new();
+    let provider = load_dstack_provider(&client, path)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(Arc::new(provider)))
+}
+
+/// Refusing beats ignoring: without `tee` the binary would otherwise boot with
+/// encryption silently off while the deployment believes it is on.
+#[cfg(not(feature = "tee"))]
+async fn resolve_dstack_provider(
+    _path: &str,
+) -> Result<Option<Arc<dyn StorageKeyProvider>>, String> {
+    Err(format!(
+        "{ENV_DSTACK_PATH} is set but this binary was built without the `tee` feature"
+    ))
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -291,7 +332,7 @@ mod tests {
 
     impl EncEnvGuard {
         fn clear() -> Self {
-            for key in [ENV_KEY, ENV_KEY_ID, ENV_SECRET_ID] {
+            for key in [ENV_KEY, ENV_KEY_ID, ENV_SECRET_ID, ENV_DSTACK_PATH] {
                 // SAFETY: serialized by ENCRYPTION_ENV_LOCK
                 unsafe { std::env::remove_var(key) };
             }
@@ -306,7 +347,7 @@ mod tests {
 
     impl Drop for EncEnvGuard {
         fn drop(&mut self) {
-            for key in [ENV_KEY, ENV_KEY_ID, ENV_SECRET_ID] {
+            for key in [ENV_KEY, ENV_KEY_ID, ENV_SECRET_ID, ENV_DSTACK_PATH] {
                 // SAFETY: serialized by ENCRYPTION_ENV_LOCK
                 unsafe { std::env::remove_var(key) };
             }
@@ -360,6 +401,38 @@ mod tests {
             .set(ENV_SECRET_ID, "some/secret/id");
         let result = resolve_storage_key_provider().await;
         assert!(matches!(&result, Err(message) if message.contains("more than one")));
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_rejects_dstack_with_dev_key() {
+        let _lock = ENCRYPTION_ENV_LOCK.lock().await;
+        let _env = EncEnvGuard::clear()
+            .set(ENV_KEY, &BASE64.encode([5u8; 32]))
+            .set(ENV_DSTACK_PATH, "guardian/storage");
+        let result = resolve_storage_key_provider().await;
+        assert!(matches!(&result, Err(message) if message.contains("more than one")));
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_rejects_dstack_with_secret_id() {
+        let _lock = ENCRYPTION_ENV_LOCK.lock().await;
+        let _env = EncEnvGuard::clear()
+            .set(ENV_SECRET_ID, "some/secret/id")
+            .set(ENV_DSTACK_PATH, "guardian/storage");
+        let result = resolve_storage_key_provider().await;
+        assert!(matches!(&result, Err(message) if message.contains("more than one")));
+    }
+
+    #[cfg(not(feature = "tee"))]
+    #[tokio::test]
+    async fn resolve_provider_refuses_dstack_without_tee_feature() {
+        let _lock = ENCRYPTION_ENV_LOCK.lock().await;
+        let _env = EncEnvGuard::clear().set(ENV_DSTACK_PATH, "guardian/storage");
+        let result = resolve_storage_key_provider().await;
+        assert!(
+            matches!(&result, Err(message) if message.contains("without the `tee` feature")),
+            "a build without `tee` must refuse, not fall through to unencrypted storage"
+        );
     }
 
     #[test]

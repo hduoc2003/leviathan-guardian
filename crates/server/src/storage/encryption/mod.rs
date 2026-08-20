@@ -7,6 +7,8 @@
 
 pub(crate) mod cipher;
 pub(crate) mod decorator;
+#[cfg(feature = "tee")]
+pub(crate) mod dstack;
 pub(crate) mod envelope;
 pub(crate) mod key_provider;
 pub(crate) mod marker;

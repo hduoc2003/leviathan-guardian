@@ -6,7 +6,9 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        GUARDIAN_SERVER_FEATURES: ""
+        # Empty default keeps the filesystem backend; `tee` adds the dstack
+        # key source.
+        GUARDIAN_SERVER_FEATURES: "${GUARDIAN_SERVER_FEATURES:-}"
     ports:
       - "3000:3000"
       - "50051:50051"

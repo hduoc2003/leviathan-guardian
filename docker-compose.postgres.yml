@@ -4,7 +4,7 @@ services:
   server:
     build:
       args:
-        GUARDIAN_SERVER_FEATURES: postgres
+        GUARDIAN_SERVER_FEATURES: "${GUARDIAN_SERVER_FEATURES:-postgres}"
     depends_on:
       postgres:
         condition: service_healthy

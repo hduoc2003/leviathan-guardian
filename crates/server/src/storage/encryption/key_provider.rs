@@ -11,6 +11,10 @@ use crate::secret::FixedKey;
 pub(crate) const ENV_KEY: &str = "GUARDIAN_STORAGE_ENCRYPTION_KEY";
 pub(crate) const ENV_KEY_ID: &str = "GUARDIAN_STORAGE_ENCRYPTION_KEY_ID";
 pub(crate) const ENV_SECRET_ID: &str = "GUARDIAN_STORAGE_ENCRYPTION_KEY_SECRET_ID";
+/// Declared here rather than in the feature-gated `dstack` module so a build
+/// without `tee` can still see the variable and refuse to boot, instead of
+/// ignoring it and silently writing plaintext.
+pub(crate) const ENV_DSTACK_PATH: &str = "GUARDIAN_STORAGE_ENCRYPTION_DSTACK_PATH";
 pub(crate) const DEFAULT_KID: &str = "k1";
 
 #[derive(Debug)]
@@ -21,6 +25,8 @@ pub(crate) enum KeyProviderError {
     MalformedSecret,
     UnknownKeyId(String),
     KeyStoreUnavailable(String),
+    #[cfg(feature = "tee")]
+    DstackUnavailable(String),
 }
 
 impl fmt::Display for KeyProviderError {
@@ -43,6 +49,10 @@ impl fmt::Display for KeyProviderError {
             }
             KeyProviderError::KeyStoreUnavailable(detail) => {
                 write!(f, "storage encryption key store unavailable: {detail}")
+            }
+            #[cfg(feature = "tee")]
+            KeyProviderError::DstackUnavailable(detail) => {
+                write!(f, "dstack guest agent unavailable: {detail}")
             }
         }
     }
