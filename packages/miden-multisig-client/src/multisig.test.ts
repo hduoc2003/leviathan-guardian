@@ -1698,6 +1698,48 @@ describe('Multisig', () => {
       );
     });
 
+    it('offline creation and signing never contact the guardian being replaced', async () => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as any);
+
+      const multisig = createTestMultisig({
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      });
+      const newGuardianPubkey = '0x' + '9'.repeat(64);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: newGuardianPubkey }),
+      });
+      mockFetch.mockImplementation(() => {
+        throw new Error('the guardian being replaced must not be contacted');
+      });
+
+      const proposal = await multisig.createSwitchGuardianProposalOffline(
+        'http://new-guardian.com',
+        newGuardianPubkey,
+      );
+
+      expect(proposal.signatures).toEqual([]);
+      expect(proposal.status).toBe('pending');
+
+      const exported = await multisig.signProposalOffline(proposal.id);
+      const signed = await multisig.importProposal(exported);
+
+      expect(signed.signatures).toHaveLength(1);
+      expect(signed.signatures[0]?.signerId).toBe(mockSigner.commitment);
+      expect(signed.status).toBe('ready');
+
+      // The count alone would pass if a request went to the wrong host, so pin
+      // the host: only the new guardian may ever be called.
+      const hosts = mockFetch.mock.calls.map(call => String(call[0]));
+      expect(hosts).toHaveLength(1);
+      expect(hosts[0]).toContain('new-guardian.com');
+    });
+
     it('should reject switch proposal when endpoint commitment does not match', async () => {
       vi.mocked(executeForSummary).mockResolvedValue({
         serialize: () => new Uint8Array([1, 2, 3]),
@@ -3426,7 +3468,8 @@ describe('Multisig', () => {
         ok: true,
         json: async () => ({ commitment: newGuardianPubkey }),
       });
-      // Pre-switch canonicalization push: getDeltaProposal then pushDelta.
+      // Pre-switch canonicalization: getDeltaProposal then pushDelta, both to
+      // the guardian being replaced.
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -3468,58 +3511,10 @@ describe('Multisig', () => {
         json: async () => ({ success: true, message: 'ok', ack_pubkey: '0x' + 'f'.repeat(64) }),
       });
       await expect(multisig.executeProposal(proposalId)).resolves.toBeUndefined();
-      expect(mockWebClient.executeTransaction).toHaveBeenCalledTimes(1);
-      expect(mockWebClient.proveTransaction).toHaveBeenCalledTimes(1);
-      expect(mockWebClient.submitProvenTransaction).toHaveBeenCalledTimes(1);
-      expect(mockWebClient.applyTransaction).toHaveBeenCalledTimes(1);
-    });
 
-    it('should still switch GUARDIAN when the pre-switch canonicalization push fails', async () => {
-      const config = {
-        threshold: 1,
-        signerCommitments: ['0x' + 'a'.repeat(64)],
-        guardianCommitment: '0x' + 'c'.repeat(64),
-      };
-
-      const multisig = createTestMultisig(config);
-      const proposalId = '0x' + 'c'.repeat(64);
-      const newGuardianPubkey = '0x' + '1'.repeat(64);
-
-      (multisig as any).proposals.set(proposalId, {
-        id: proposalId,
-        accountId: multisig.accountId,
-        nonce: 1,
-        status: 'ready',
-        txSummary: 'AQID',
-        signatures: [
-          {
-            signerId: '0x' + 'a'.repeat(64),
-            signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
-            timestamp: '2024-01-01T00:00:00Z',
-          },
-        ],
-        metadata: {
-          proposalType: 'switch_guardian',
-          newGuardianPubkey,
-          newGuardianEndpoint: 'http://new-guardian.com',
-          description: '',
-        },
-      });
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ commitment: newGuardianPubkey }),
-      });
-      // getDeltaProposal against the old GUARDIAN fails — must be swallowed.
-      mockFetch.mockRejectedValueOnce(new Error('pre-switch GUARDIAN unreachable'));
-      mockWebClient.getAccount.mockResolvedValueOnce({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      });
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, message: 'ok', ack_pubkey: '0x' + 'f'.repeat(64) }),
-      });
-      await expect(multisig.executeProposal(proposalId)).resolves.toBeUndefined();
+      const hosts = mockFetch.mock.calls.map(call => String(call[0]));
+      expect(hosts.some(host => host.includes('localhost:3000'))).toBe(true);
+      expect(hosts.some(host => host.includes('new-guardian.com'))).toBe(true);
       expect(mockWebClient.executeTransaction).toHaveBeenCalledTimes(1);
       expect(mockWebClient.proveTransaction).toHaveBeenCalledTimes(1);
       expect(mockWebClient.submitProvenTransaction).toHaveBeenCalledTimes(1);

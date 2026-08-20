@@ -6,9 +6,11 @@ set -euo pipefail
 # the fork's WASM SDK uses (e.g. 0.15.0-node.5e72c326).
 #
 # Usage:
-#   GITEA_NPM_TOKEN=... ./scripts/publish-npm.sh [package-dir ...] [--dry-run]
+#   GITEA_NPM_TOKEN=... ./scripts/publish-npm.sh [--dry-run]
 #
-# With no package arguments it publishes all four, in dependency order.
+# Always publishes all four, in dependency order. A subset is not offered: every
+# in-repo dependency is rewritten to the version being stamped, so a package left
+# behind leaves its dependents pointing at a version the registry never got.
 # Override the prerelease id with VERSION_TAG (defaults to `node`).
 #
 # Consumers must map the scope to this registry, otherwise npm looks for these
@@ -19,23 +21,20 @@ REGISTRY="https://git.softly.com/api/packages/leviathan/npm/"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # guardian-client first: miden-multisig-client depends on it.
-DEFAULT_PACKAGES=(
+PACKAGES=(
   guardian-client
   guardian-operator-client
   guardian-evm-client
   miden-multisig-client
 )
 
-PACKAGES=()
 DRY_RUN=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
-    -*) echo "unknown flag: $arg" >&2; exit 2 ;;
-    *) PACKAGES+=("$arg") ;;
+    *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
   esac
 done
-[ ${#PACKAGES[@]} -eq 0 ] && PACKAGES=("${DEFAULT_PACKAGES[@]}")
 
 [ -n "${GITEA_NPM_TOKEN:-}" ] || { echo "GITEA_NPM_TOKEN is not set" >&2; exit 1; }
 
@@ -48,6 +47,7 @@ if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
 fi
 
 SHA="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
+declare -A VERSIONS
 
 for package in "${PACKAGES[@]}"; do
   [ -f "$REPO_ROOT/packages/$package/package.json" ] \
@@ -97,18 +97,33 @@ for package in "${PACKAGES[@]}"; do
     @openzeppelin/guardian-evm-client \
     @openzeppelin/miden-multisig-client)"
 
+  VERSIONS[$package]="$VERSION"
   echo "=== $package -> $VERSION ==="
   (cd "$package_dir" && npm run build && npm test)
+done
+
+# Publishing is a second pass: a build failing midway through the first would
+# otherwise publish some packages against versions the rest never reached.
+for package in "${PACKAGES[@]}"; do
+  package_dir="$REPO_ROOT/packages/$package"
+  version="${VERSIONS[$package]}"
+  name="$(node -p "require('$package_dir/package.json').name")"
 
   if [ "$DRY_RUN" -eq 1 ]; then
     (cd "$package_dir" && npm publish --registry="$REGISTRY" --dry-run)
+  elif npm view "$name@$version" version --registry="$REGISTRY" > /dev/null 2>&1; then
+    # Already up there, so a run retried after a mid-publish failure finishes
+    # the remaining packages instead of dying on a duplicate version.
+    echo "skipped $package@$version (already published)"
   else
     (cd "$package_dir" && npm publish --registry="$REGISTRY")
-    echo "published $package@$VERSION"
+    echo "published $package@$version"
   fi
 done
 
-[ "$DRY_RUN" -eq 1 ] && echo "dry run only; nothing was published"
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "dry run only; nothing was published"
+fi
 
 # Every package.json is restored by the trap: the stamped version belongs to the
 # published artifact, not to the working tree.

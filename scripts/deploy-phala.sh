@@ -57,8 +57,13 @@ python3 - "$COMPOSE" "$REPO_REF" "$DIGEST" <<'PY'
 import re, sys
 path, repo_ref, digest = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path).read()
-# Anchored on the repository so the sidecar images keep their own pins.
-pattern = r'^(\s*image:\s*)' + re.escape(repo_ref) + r'[@:].*$'
+# Matches the guardian line only - either the committed placeholder or an
+# already-pinned digest for this repository - so the sidecar images keep theirs.
+pattern = (
+    r'^(\s*image:\s*)(?:'
+    + re.escape(repo_ref)
+    + r'[@:]|REGISTRY/guardian@sha256:0{64}).*$'
+)
 new, count = re.subn(pattern, lambda m: m.group(1) + digest, text, flags=re.M)
 if count != 1:
     sys.exit(f"expected exactly one {repo_ref} image line in {path}, replaced {count}")

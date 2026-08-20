@@ -86,6 +86,45 @@ describe('MultisigClient', () => {
     };
   });
 
+  describe('loadFromAccount', () => {
+    it('builds the multisig without asking the guardian for the account', async () => {
+      mockFetch.mockImplementation(() => {
+        throw new Error('the guardian must not be contacted');
+      });
+      const accountId = '0x' + 'd'.repeat(30);
+      const account: any = {
+        id: () => ({ toString: () => accountId }),
+        serialize: () => new Uint8Array([1, 2, 3]),
+      };
+
+      const client = new MultisigClient(webClient, CLIENT_CONFIG);
+      const multisig = await client.loadFromAccount(account, mockSigner);
+
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(multisig.accountId).toBe(accountId);
+      // The config is the reason this path exists; asserting only "no fetch"
+      // would pass for a multisig built from nothing.
+      expect(multisig.threshold).toBe(2);
+      expect(multisig.signerCommitments).toEqual(['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)]);
+      expect(multisig.guardianCommitment).toBe('0x' + 'c'.repeat(64));
+      expect(webClient.accounts.insert).toHaveBeenCalledWith({ account, overwrite: true });
+    });
+
+    it('does not re-insert an account the client already holds', async () => {
+      const accountId = '0x' + 'd'.repeat(30);
+      const account: any = {
+        id: () => ({ toString: () => accountId }),
+        serialize: () => new Uint8Array([1, 2, 3]),
+      };
+      webClient.accounts.get.mockResolvedValue(account);
+
+      const client = new MultisigClient(webClient, CLIENT_CONFIG);
+      await client.loadFromAccount(account, mockSigner);
+
+      expect(webClient.accounts.insert).not.toHaveBeenCalled();
+    });
+  });
+
   describe('constructor', () => {
     it('should create client when both endpoints are supplied', () => {
       const client = new MultisigClient(webClient, CLIENT_CONFIG);

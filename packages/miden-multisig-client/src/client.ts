@@ -213,6 +213,26 @@ export class MultisigClient {
     }
     const account = Account.deserialize(accountBytes);
 
+    return this.buildMultisig(account, accountId, signer);
+  }
+
+  /**
+   * Build the multisig from an account the caller already holds, skipping the
+   * guardian round-trip that {@link load} makes. switch_guardian has to work
+   * while the guardian being replaced is unreachable; every other operation
+   * needs that guardian alive anyway, so they keep using `load`.
+   */
+  async loadFromAccount(account: Account, signer: Signer): Promise<Multisig> {
+    this._guardianClient.setSigner(signer);
+
+    return this.buildMultisig(account, account.id().toString(), signer);
+  }
+
+  private async buildMultisig(
+    account: Account,
+    accountId: string,
+    signer: Signer,
+  ): Promise<Multisig> {
     const detected = AccountInspector.fromAccount(account);
     const config: MultisigConfig = {
       threshold: detected.threshold,

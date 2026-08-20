@@ -795,6 +795,55 @@ export class Multisig {
     newGuardianPubkey: string,
     nonce?: number,
   ): Promise<Proposal> {
+    const { summaryBase64, metadata, proposalNonce } = await this.buildSwitchGuardianProposal(
+      newGuardianEndpoint,
+      newGuardianPubkey,
+      nonce,
+    );
+
+    return this.createProposal(proposalNonce, summaryBase64, metadata);
+  }
+
+  /**
+   * Same proposal as {@link createSwitchGuardianProposal}, kept out of the
+   * guardian store. Use it when the guardian being replaced is unreachable,
+   * which is the one case a switch still has to work in: switch_guardian is
+   * authorized by the signers alone and never asks that guardian to ack. The
+   * caller then carries the proposal to its cosigners itself, via
+   * {@link exportProposalToJson} / {@link importProposal} and
+   * {@link signProposalOffline}.
+   */
+  async createSwitchGuardianProposalOffline(
+    newGuardianEndpoint: string,
+    newGuardianPubkey: string,
+    nonce?: number,
+  ): Promise<Proposal> {
+    const { summaryBase64, metadata, proposalNonce } = await this.buildSwitchGuardianProposal(
+      newGuardianEndpoint,
+      newGuardianPubkey,
+      nonce,
+    );
+
+    const proposal: Proposal = {
+      id: normalizeHexWord(computeCommitmentFromTxSummary(summaryBase64)),
+      accountId: this._accountId,
+      nonce: proposalNonce,
+      status: 'pending',
+      txSummary: summaryBase64,
+      signatures: [],
+      metadata: ProposalMetadataCodec.validate(metadata),
+    };
+    await this.verifyProposalMetadataBinding(proposal);
+    this.proposals.set(proposal.id, proposal);
+
+    return proposal;
+  }
+
+  private async buildSwitchGuardianProposal(
+    newGuardianEndpoint: string,
+    newGuardianPubkey: string,
+    nonce?: number,
+  ): Promise<{ summaryBase64: string; metadata: ProposalMetadata; proposalNonce: number }> {
     const webClient = await this.getRawClient();
     await this.verifyGuardianEndpointCommitment(newGuardianEndpoint, newGuardianPubkey);
 
@@ -805,21 +854,19 @@ export class Multisig {
     );
 
     const summary = await executeForSummary(webClient, this._accountId, request);
-    const summaryBase64 = uint8ArrayToBase64(summary.serialize());
-    const proposalNonce = nonce ?? Date.now();
 
-    const metadata: ProposalMetadata = {
-      proposalType: 'switch_guardian',
-      saltHex: salt.toHex(),
-      requiredSignatures: this.getEffectiveThreshold('switch_guardian'),
-      newGuardianPubkey,
-      newGuardianEndpoint,
-      description: `Switch GUARDIAN to ${newGuardianEndpoint}`,
+    return {
+      summaryBase64: uint8ArrayToBase64(summary.serialize()),
+      proposalNonce: nonce ?? Date.now(),
+      metadata: {
+        proposalType: 'switch_guardian',
+        saltHex: salt.toHex(),
+        requiredSignatures: this.getEffectiveThreshold('switch_guardian'),
+        newGuardianPubkey,
+        newGuardianEndpoint,
+        description: `Switch GUARDIAN to ${newGuardianEndpoint}`,
+      },
     };
-
-    // SwitchGuardian is a regular delta proposal; push it to GUARDIAN so
-    // sign/execute (which fetch from GUARDIAN) can find it.
-    return this.createProposal(proposalNonce, summaryBase64, metadata);
   }
 
   /**
@@ -1205,7 +1252,7 @@ export class Multisig {
     proposalId: string,
     normalizedProposalId: string,
   ): Promise<Proposal | undefined> {
-    const cachedProposal = this.proposals.get(proposalId);
+    const cachedProposal = this.getLocalProposal(proposalId);
     if (cachedProposal) {
       return cachedProposal;
     }
@@ -1250,7 +1297,7 @@ export class Multisig {
           deltaPayload: switchDelta.deltaPayload.txSummary,
         });
       } catch (error) {
-        // Best-effort — see above — but the failure must be visible: a
+        // Best-effort - see above - but the failure must be visible: a
         // silently lost push leaves the pre-switch GUARDIAN serving this
         // account (split-brain, issue #305) with nothing to diagnose by.
         console.warn(
