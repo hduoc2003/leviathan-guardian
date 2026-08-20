@@ -13,17 +13,18 @@
 //! the old one (recovery then requires a per-account `SwitchGuardian`).
 
 use crate::error::{GuardianError, Result};
-use crate::secret::SecretString;
+use crate::secret::{SecretBytes, SecretString};
 use async_trait::async_trait;
 use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey as EcdsaSecretKey;
 use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey as FalconSecretKey;
-use miden_protocol::utils::serde::Deserializable;
+use miden_protocol::utils::serde::{Deserializable, Serializable};
 use std::path::{Path, PathBuf};
 
 use super::secrets_manager::{AckSecretProvider, decode_secret_key};
 
 const ENV_ACK_FALCON_SECRET_PATH: &str = "GUARDIAN_ACK_FALCON_SECRET_PATH";
 const ENV_ACK_ECDSA_SECRET_PATH: &str = "GUARDIAN_ACK_ECDSA_SECRET_PATH";
+const ENV_ACK_SECRET_AUTOGEN: &str = "GUARDIAN_ACK_SECRET_AUTOGEN";
 
 /// Reads the ACK secrets from local files. Construct with [`from_env`].
 ///
@@ -37,6 +38,9 @@ pub struct FileSecretProvider {
     ///
     /// [`ecdsa_secret_key`]: AckSecretProvider::ecdsa_secret_key
     ecdsa_secret_path: Option<PathBuf>,
+    /// Opt-in, because a mistyped path or an unmounted volume would otherwise
+    /// mint a new identity and freeze every account pinned to the old commitment.
+    autogen: bool,
 }
 
 impl FileSecretProvider {
@@ -44,13 +48,25 @@ impl FileSecretProvider {
         Ok(Self {
             falcon_secret_path: required_path(ENV_ACK_FALCON_SECRET_PATH)?,
             ecdsa_secret_path: optional_path(ENV_ACK_ECDSA_SECRET_PATH)?,
+            autogen: autogen_from_env()?,
         })
     }
 
-    fn parsed_secret_key<T, F>(&self, path: &Path, parser: F) -> Result<T>
+    fn parsed_secret_key<T, F, G>(&self, path: &Path, parser: F, generate: G) -> Result<T>
     where
         F: FnOnce(&[u8]) -> std::result::Result<T, String>,
+        G: FnOnce() -> SecretBytes,
     {
+        if self.autogen
+            && !path.try_exists().map_err(|error| {
+                GuardianError::ConfigurationError(format!(
+                    "Failed to check ack secret file {}: {error}",
+                    path.display()
+                ))
+            })?
+        {
+            write_new_secret_file(path, generate())?;
+        }
         ensure_owner_only(path)?;
         // Read-and-wrap in one expression so the key bytes never bind to a bare
         // `String` (CONTRIBUTING.md, "Secrets in server memory").
@@ -71,9 +87,13 @@ impl FileSecretProvider {
 #[async_trait]
 impl AckSecretProvider for FileSecretProvider {
     async fn falcon_secret_key(&self) -> Result<FalconSecretKey> {
-        self.parsed_secret_key(&self.falcon_secret_path, |secret_bytes| {
-            FalconSecretKey::read_from_bytes(secret_bytes).map_err(|error| error.to_string())
-        })
+        self.parsed_secret_key(
+            &self.falcon_secret_path,
+            |secret_bytes| {
+                FalconSecretKey::read_from_bytes(secret_bytes).map_err(|error| error.to_string())
+            },
+            || SecretBytes::new(FalconSecretKey::new().to_bytes()),
+        )
     }
 
     async fn ecdsa_secret_key(&self) -> Result<EcdsaSecretKey> {
@@ -82,10 +102,99 @@ impl AckSecretProvider for FileSecretProvider {
                 "{ENV_ACK_ECDSA_SECRET_PATH} is required for the in-memory ECDSA backend; set it or use GUARDIAN_ACK_ECDSA_BACKEND=aws-kms"
             ))
         })?;
-        self.parsed_secret_key(path, |secret_bytes| {
-            EcdsaSecretKey::read_from_bytes(secret_bytes).map_err(|error| error.to_string())
-        })
+        self.parsed_secret_key(
+            path,
+            |secret_bytes| {
+                EcdsaSecretKey::read_from_bytes(secret_bytes).map_err(|error| error.to_string())
+            },
+            || SecretBytes::new(EcdsaSecretKey::new().to_bytes()),
+        )
     }
+}
+
+fn autogen_from_env() -> Result<bool> {
+    match std::env::var(ENV_ACK_SECRET_AUTOGEN) {
+        Ok(value) => parse_autogen(Some(&value)),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => Err(GuardianError::ConfigurationError(format!(
+            "{ENV_ACK_SECRET_AUTOGEN} must contain valid UTF-8"
+        ))),
+    }
+}
+
+fn parse_autogen(raw: Option<&str>) -> Result<bool> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("") | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(other) => Err(GuardianError::ConfigurationError(format!(
+            "{ENV_ACK_SECRET_AUTOGEN} `{other}` is not supported (expected `true` or `false`)"
+        ))),
+    }
+}
+
+/// Fsyncs a temporary file, then hard-links it into place: `link` reports
+/// `AlreadyExists` rather than overwriting, and the name appears only once the
+/// bytes are durable, so a concurrent boot can neither clobber the winner's key
+/// nor read a half-written one.
+fn write_new_secret_file(path: &Path, secret: SecretBytes) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            GuardianError::ConfigurationError(format!(
+                "Failed to create ack secret directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+    write_secret_bytes(&temp_path, secret)?;
+
+    let result = match std::fs::hard_link(&temp_path, path) {
+        Ok(()) => {
+            tracing::warn!(
+                path = %path.display(),
+                "minted a new ACK secret; the on-chain ack-key commitment changes with it"
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(GuardianError::ConfigurationError(format!(
+            "Failed to publish ack secret file {}: {error}",
+            path.display()
+        ))),
+    };
+    std::fs::remove_file(&temp_path).ok();
+    result
+}
+
+fn write_secret_bytes(path: &Path, secret: SecretBytes) -> Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path).map_err(|error| {
+        GuardianError::ConfigurationError(format!(
+            "Failed to create ack secret file {}: {error}",
+            path.display()
+        ))
+    })?;
+    // Encode-and-wrap in one expression so the hex copy is zeroized like the
+    // bytes it came from.
+    let encoded = SecretString::new(hex::encode(secret.expose_secret()));
+    file.write_all(encoded.expose_secret().as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            GuardianError::ConfigurationError(format!(
+                "Failed to write ack secret file {}: {error}",
+                path.display()
+            ))
+        })
 }
 
 fn required_path(env_var: &str) -> Result<PathBuf> {
@@ -166,7 +275,6 @@ fn ensure_owner_only(_path: &Path) -> Result<()> {
 #[cfg(all(test, not(any(feature = "integration", feature = "e2e"))))]
 mod tests {
     use super::*;
-    use miden_protocol::utils::serde::Serializable;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -204,6 +312,7 @@ mod tests {
         let provider = FileSecretProvider {
             falcon_secret_path: falcon_path,
             ecdsa_secret_path: Some(ecdsa_path),
+            autogen: false,
         };
 
         assert_eq!(
@@ -226,6 +335,7 @@ mod tests {
         let provider = FileSecretProvider {
             falcon_secret_path: falcon_path,
             ecdsa_secret_path: None,
+            autogen: false,
         };
 
         let first = provider.falcon_secret_key().await.unwrap();
@@ -249,6 +359,7 @@ mod tests {
         let provider = FileSecretProvider {
             falcon_secret_path: dir.join("falcon"),
             ecdsa_secret_path: Some(ecdsa_path),
+            autogen: false,
         };
 
         assert_eq!(
@@ -263,6 +374,7 @@ mod tests {
         let provider = FileSecretProvider {
             falcon_secret_path: PathBuf::from("/nonexistent/guardian/ack-falcon"),
             ecdsa_secret_path: Some(PathBuf::from("/nonexistent/guardian/ack-ecdsa")),
+            autogen: false,
         };
         assert!(matches!(
             provider.falcon_secret_key().await,
@@ -278,6 +390,7 @@ mod tests {
         let provider = FileSecretProvider {
             falcon_secret_path: falcon_path,
             ecdsa_secret_path: None,
+            autogen: false,
         };
 
         let err = provider.falcon_secret_key().await.unwrap_err();
@@ -299,6 +412,7 @@ mod tests {
         let provider = FileSecretProvider {
             falcon_secret_path: falcon_path,
             ecdsa_secret_path: None,
+            autogen: false,
         };
 
         assert_eq!(
@@ -326,6 +440,7 @@ mod tests {
         let provider = FileSecretProvider {
             falcon_secret_path: falcon_path,
             ecdsa_secret_path: None,
+            autogen: false,
         };
 
         let err = provider.falcon_secret_key().await.unwrap_err();
@@ -333,5 +448,163 @@ mod tests {
             matches!(err, GuardianError::ConfigurationError(message) if message.contains("0600"))
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_file_without_autogen_is_an_error() {
+        let dir = temp_dir("no-autogen");
+        let provider = FileSecretProvider {
+            falcon_secret_path: dir.join("falcon"),
+            ecdsa_secret_path: None,
+            autogen: false,
+        };
+
+        let error = provider.falcon_secret_key().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to inspect ack secret file"),
+            "a missing file must stay an error when autogen is off, got: {error}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn autogen_mints_and_persists_a_falcon_key() {
+        let dir = temp_dir("autogen-falcon");
+        let path = dir.join("nested").join("falcon");
+        let provider = FileSecretProvider {
+            falcon_secret_path: path.clone(),
+            ecdsa_secret_path: None,
+            autogen: true,
+        };
+
+        let minted = provider.falcon_secret_key().await.unwrap();
+        assert!(path.exists(), "autogen must create the key file");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "generated key file must be 0600");
+        }
+
+        // A second provider over the same path must load the stored key, not mint a
+        // new one - the on-chain ack commitment depends on that.
+        let reopened = FileSecretProvider {
+            falcon_secret_path: path,
+            ecdsa_secret_path: None,
+            autogen: true,
+        };
+        assert_eq!(
+            reopened
+                .falcon_secret_key()
+                .await
+                .unwrap()
+                .public_key()
+                .to_commitment(),
+            minted.public_key().to_commitment()
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn autogen_mints_and_persists_an_ecdsa_key() {
+        let dir = temp_dir("autogen-ecdsa");
+        let path = dir.join("ecdsa");
+        let provider = FileSecretProvider {
+            falcon_secret_path: dir.join("falcon"),
+            ecdsa_secret_path: Some(path.clone()),
+            autogen: true,
+        };
+
+        let minted = provider.ecdsa_secret_key().await.unwrap();
+        let reopened = FileSecretProvider {
+            falcon_secret_path: dir.join("falcon"),
+            ecdsa_secret_path: Some(path),
+            autogen: true,
+        };
+        assert_eq!(
+            reopened.ecdsa_secret_key().await.unwrap().to_bytes(),
+            minted.to_bytes()
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn autogen_does_not_overwrite_an_existing_key() {
+        let dir = temp_dir("autogen-existing");
+        let path = dir.join("falcon");
+        let existing = FalconSecretKey::new();
+        write_hex(&path, &existing.to_bytes());
+        let provider = FileSecretProvider {
+            falcon_secret_path: path,
+            ecdsa_secret_path: None,
+            autogen: true,
+        };
+
+        assert_eq!(
+            provider.falcon_secret_key().await.unwrap().to_bytes(),
+            existing.to_bytes()
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn autogen_still_requires_the_ecdsa_path() {
+        let dir = temp_dir("autogen-no-ecdsa-path");
+        let provider = FileSecretProvider {
+            falcon_secret_path: dir.join("falcon"),
+            ecdsa_secret_path: None,
+            autogen: true,
+        };
+
+        let error = provider.ecdsa_secret_key().await.unwrap_err();
+        assert!(
+            error.to_string().contains(ENV_ACK_ECDSA_SECRET_PATH),
+            "an unset ecdsa path is a configuration error, not something to mint, got: {error}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn publishing_over_an_existing_file_keeps_the_first_key() {
+        let dir = temp_dir("publish-race");
+        let path = dir.join("falcon");
+        let first = FalconSecretKey::new();
+        let second = FalconSecretKey::new();
+
+        write_new_secret_file(&path, SecretBytes::new(first.to_bytes())).unwrap();
+        write_new_secret_file(&path, SecretBytes::new(second.to_bytes())).unwrap();
+
+        let provider = FileSecretProvider {
+            falcon_secret_path: path.clone(),
+            ecdsa_secret_path: None,
+            autogen: false,
+        };
+        assert_eq!(
+            provider.falcon_secret_key().await.unwrap().to_bytes(),
+            first.to_bytes(),
+            "the second write must not replace the published key"
+        );
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("tmp")),
+            "the temporary file must not be left behind"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn autogen_flag_rejects_junk() {
+        assert!(!parse_autogen(None).unwrap());
+        assert!(!parse_autogen(Some("false")).unwrap());
+        assert!(parse_autogen(Some("true")).unwrap());
+        assert!(parse_autogen(Some(" TRUE ")).unwrap());
+        assert!(parse_autogen(Some("yes")).is_err());
     }
 }

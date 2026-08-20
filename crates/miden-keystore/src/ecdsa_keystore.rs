@@ -53,14 +53,17 @@ impl FilesystemEcdsaKeyStore {
     }
 
     fn write_key_file(&self, file_path: &Path, filename: &str, key_bytes: &[u8]) -> Result<()> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(file_path)
-            .map_err(|error| {
-                KeyStoreError::StorageError(format!("Failed to open key file {filename}: {error}"))
-            })?;
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        // Otherwise the umask decides, and a private key lands world-readable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(file_path).map_err(|error| {
+            KeyStoreError::StorageError(format!("Failed to open key file {filename}: {error}"))
+        })?;
 
         let mut writer = BufWriter::new(file);
         let encoded = Zeroizing::new(hex::encode(key_bytes));

@@ -6,7 +6,7 @@ set -euo pipefail
 # deploys the result.
 #
 # Usage:
-#   ./scripts/deploy-phala.sh <registry/repo:tag> [--repo <owner/name>] \
+#   ./scripts/deploy-phala.sh <registry/repo:tag> --repo <owner/name> \
 #     [--cvm-id <id>] [--dry-run]
 #
 # The image is built by .github/workflows/docker-publish.yml, never here.
@@ -32,19 +32,18 @@ while [ $# -gt 0 ]; do
     *) IMAGE="$1"; shift ;;
   esac
 done
-[ -n "$IMAGE" ] || { echo "usage: $0 <registry/repo:tag> [--repo <owner/name>] [--cvm-id <id>] [--dry-run]" >&2; exit 2; }
+[ -n "$IMAGE" ] && [ -n "$GH_REPO" ] || { echo "usage: $0 <registry/repo:tag> --repo <owner/name> [--cvm-id <id>] [--dry-run]" >&2; exit 2; }
 case "${IMAGE##*/}" in
   *:*) ;;
   *) echo "expected <registry/repo:tag>, got '$IMAGE'" >&2; exit 2 ;;
 esac
 REPO_REF="${IMAGE%:*}"
-# ghcr.io/<owner>/guardian -> <owner>/guardian; override with --repo when the
-# registry path and the GitHub repo name diverge.
-[ -n "$GH_REPO" ] || GH_REPO="${REPO_REF#ghcr.io/}"
 
+# Hashing the raw manifest is the definition of the digest, and unlike
+# `--format` it does not depend on the buildx version.
 echo ">> Resolving $IMAGE"
-SHA="$(docker buildx imagetools inspect "$IMAGE" --format '{{.Manifest.Digest}}')"
-[ -n "$SHA" ] || { echo "could not resolve $IMAGE; has the publish workflow run?" >&2; exit 1; }
+SHA="sha256:$(docker buildx imagetools inspect --raw "$IMAGE" | sha256sum | cut -d' ' -f1)"
+[ "$SHA" != "sha256:" ] || { echo "could not resolve $IMAGE; has the publish workflow run?" >&2; exit 1; }
 DIGEST="$REPO_REF@$SHA"
 echo ">> Digest $DIGEST"
 
@@ -54,13 +53,15 @@ echo ">> Digest $DIGEST"
 echo ">> Verifying build provenance against $GH_REPO"
 gh attestation verify "oci://$DIGEST" --repo "$GH_REPO"
 
-python3 - "$COMPOSE" "$DIGEST" <<'PY'
+python3 - "$COMPOSE" "$REPO_REF" "$DIGEST" <<'PY'
 import re, sys
-path, digest = sys.argv[1], sys.argv[2]
+path, repo_ref, digest = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path).read()
-new, count = re.subn(r'^(\s*image:\s*).*$', lambda m: m.group(1) + digest, text, count=1, flags=re.M)
+# Anchored on the repository so the sidecar images keep their own pins.
+pattern = r'^(\s*image:\s*)' + re.escape(repo_ref) + r'[@:].*$'
+new, count = re.subn(pattern, lambda m: m.group(1) + digest, text, flags=re.M)
 if count != 1:
-    sys.exit(f"expected exactly one image line in {path}, replaced {count}")
+    sys.exit(f"expected exactly one {repo_ref} image line in {path}, replaced {count}")
 open(path, 'w').write(new)
 print(f">> Pinned {path}")
 PY

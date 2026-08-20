@@ -57,14 +57,17 @@ impl<R: RngCore + Send + Sync> FilesystemKeyStore<R> {
     }
 
     fn write_key_file(&self, file_path: &Path, filename: &str, key_bytes: &[u8]) -> Result<()> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(file_path)
-            .map_err(|error| {
-                KeyStoreError::StorageError(format!("Failed to open key file {filename}: {error}"))
-            })?;
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        // Otherwise the umask decides, and a private key lands world-readable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(file_path).map_err(|error| {
+            KeyStoreError::StorageError(format!("Failed to open key file {filename}: {error}"))
+        })?;
 
         let mut writer = BufWriter::new(file);
         let encoded = Zeroizing::new(hex::encode(key_bytes));
@@ -256,6 +259,28 @@ mod tests {
         let error = keystore.add_key(&secret_key).unwrap_err();
         assert!(
             matches!(error, KeyStoreError::StorageError(message) if message.contains("different key material"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_add_key_writes_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let keystore =
+            FilesystemKeyStore::<ChaCha20Rng>::new(temp_dir.path().to_path_buf()).unwrap();
+        let secret_key = SecretKey::new();
+        keystore.add_key(&secret_key).unwrap();
+
+        let file_path = temp_dir
+            .path()
+            .join(hash_pub_key(secret_key.public_key().to_commitment()));
+        let mode = std::fs::metadata(&file_path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "a stored private key must not be readable by group or others"
         );
     }
 

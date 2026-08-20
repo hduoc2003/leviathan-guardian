@@ -1,11 +1,14 @@
 # Non-secrets are inlined because `compose_hash` covers only this file, so a
 # value left as a variable is not pinned by the on-chain approval.
 #
-# Update the digest with `scripts/deploy-phala.sh`; do not hand-edit it.
+# Update the guardian digest with `scripts/deploy-phala.sh`; do not hand-edit it.
 services:
   guardian:
     image: REGISTRY/guardian@sha256:0000000000000000000000000000000000000000000000000000000000000000
     restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "3000:3000"
       - "50051:50051"
@@ -13,6 +16,7 @@ services:
       # How the container reaches the dstack guest agent that derives the
       # storage encryption key. Without it the server refuses to boot.
       - /var/run/dstack.sock:/var/run/dstack.sock
+      - guardian-keystore:/var/guardian/keystore
     environment:
       GUARDIAN_ENV: prod
       GUARDIAN_NETWORK_TYPE: MidenTestnet
@@ -22,14 +26,40 @@ services:
       # node has to be pinned here.
       GUARDIAN_MIDEN_RPC_ENDPOINT: http://178.63.134.75:57291
       # An ephemeral ack key would change the on-chain ack-key commitment on
-      # every restart and freeze accounts that pinned the previous one.
-      GUARDIAN_ACK_SECRET_PROVIDER: aws
-      AWS_REGION: us-east-1
+      # every restart and freeze accounts that pinned the previous one, so the
+      # keys are minted once onto the encrypted volume above and read back after.
+      GUARDIAN_ACK_SECRET_PROVIDER: file
+      GUARDIAN_ACK_FALCON_SECRET_PATH: /var/guardian/keystore/ack-falcon.hex
+      GUARDIAN_ACK_ECDSA_SECRET_PATH: /var/guardian/keystore/ack-ecdsa.hex
+      GUARDIAN_ACK_SECRET_AUTOGEN: "true"
+      # Only the password is a variable; host, user and database name are part
+      # of what the approved hash pins.
+      DATABASE_URL: postgres://guardian:${POSTGRES_PASSWORD:?set it in the encrypted env}@postgres:5432/guardian
       # Secret-bearing only. Supplied through Phala's encrypted environment,
-      # which is delivered separately from this file and so is not hashed.
-      DATABASE_URL: ${DATABASE_URL}
-      GUARDIAN_ACK_FALCON_SECRET_ID: ${GUARDIAN_ACK_FALCON_SECRET_ID}
-      GUARDIAN_ACK_ECDSA_SECRET_ID: ${GUARDIAN_ACK_ECDSA_SECRET_ID}
+      # which is delivered separately from this file and so is not hashed. The
+      # `:?` form aborts the deploy on a missing value; plain `${VAR}` would
+      # substitute an empty string and hand the server a blank credential.
+      # The cursor secret is deliberately not required: blank reads as unset and
+      # only degrades dashboard pagination across replicas.
       GUARDIAN_DASHBOARD_CURSOR_SECRET: ${GUARDIAN_DASHBOARD_CURSOR_SECRET}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+
+  postgres:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: always
+    # No `ports`: dstack turns every published port into a public endpoint, and
+    # nothing outside this compose needs to reach the database.
+    volumes:
+      - guardian-postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: guardian
+      POSTGRES_DB: guardian
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in the encrypted env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guardian -d guardian"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  guardian-postgres:
+  guardian-keystore:

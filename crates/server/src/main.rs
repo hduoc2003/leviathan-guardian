@@ -12,6 +12,9 @@ use std::path::PathBuf;
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
+    // Storage and ack construction below both log, including the warning that a
+    // new ACK identity was minted; a subscriber installed in `build()` misses them.
+    LoggingConfig::default().init();
 
     let keystore_path: PathBuf = env::var("GUARDIAN_KEYSTORE_PATH")
         .unwrap_or_else(|_| "/var/guardian/keystore".to_string())
@@ -35,7 +38,6 @@ async fn main() {
         NetworkType::from_env("GUARDIAN_NETWORK_TYPE").expect("Failed to resolve network type");
 
     ServerBuilder::new()
-        .with_logging(LoggingConfig::default())
         .network(network_type)
         .with_rpc(RpcSettings::from_env(network_type).expect("Invalid RPC configuration"))
         .with_canonicalization(Some(

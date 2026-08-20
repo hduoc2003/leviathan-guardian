@@ -113,6 +113,22 @@ With `GUARDIAN_ACK_ECDSA_BACKEND=aws-kms` the ECDSA key comes from KMS and its
 file is never read, so you can omit `GUARDIAN_ACK_ECDSA_SECRET_PATH` entirely on
 that path; only the Falcon file is required.
 
+#### Letting the server mint them instead
+
+`GUARDIAN_ACK_SECRET_AUTOGEN=true` makes a missing key file get generated on the
+spot (`0600`, parent directories created) rather than failing startup, so a
+deployment whose keystore sits on persistent encrypted storage - a confidential
+VM, for instance - creates its identity on first boot and reads it back forever
+after. Minting logs a warning naming the file, and every boot logs an `ack
+signers` line with both commitments.
+
+It is off by default and should stay off wherever the keys are provisioned
+externally: with it on, a mistyped path or a volume that failed to mount stops
+being a startup error and becomes a **new** Guardian identity, freezing every
+account pinned to the previous commitment while the boot looks clean. The
+trade-off is that nothing outside the machine ever holds a copy, so losing the
+storage loses the identity - there is no backup to restore from.
+
 ### Hosted ECDSA backend (AWS KMS)
 
 The ECDSA ACK signer can be backed by AWS KMS instead of a Secrets Manager

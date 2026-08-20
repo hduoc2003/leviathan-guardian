@@ -58,6 +58,10 @@ impl DashboardConfig {
     pub fn from_env_for_network(network_type: NetworkType) -> std::result::Result<Self, String> {
         let cursor_secret = std::env::var("GUARDIAN_DASHBOARD_CURSOR_SECRET")
             .ok()
+            .map(|value| value.trim().to_owned())
+            // Blank reads as unset, like DATABASE_URL and the operator allowlist:
+            // an unsupplied compose variable interpolates to "" and must not panic.
+            .filter(|value| !value.is_empty())
             .map(Zeroizing::new)
             .map(|hex| CursorSecret::from_hex(hex.as_str()))
             .transpose()
@@ -325,5 +329,13 @@ mod tests {
                 .environment(),
             "local"
         );
+    }
+
+    #[test]
+    fn blank_cursor_secret_reads_as_unset() {
+        let _guard = EnvVarGuard::set("GUARDIAN_DASHBOARD_CURSOR_SECRET", "   ");
+        let config = DashboardConfig::from_env_for_network(NetworkType::MidenTestnet)
+            .expect("a blank cursor secret must not fail startup");
+        assert!(config.cursor_secret.is_none());
     }
 }
