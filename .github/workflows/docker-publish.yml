@@ -192,6 +192,7 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
           SOURCE_REF: ${{ steps.params.outputs.ref }}
           SHORT_SHA: ${{ steps.commit.outputs.short }}
+          REPO: ${{ github.repository }}
         run: |
           {
             echo "### Published \`${IMAGE}\`"
@@ -203,5 +204,10 @@ jobs:
             echo "**Tags:**"
             echo '```'
             echo "${TAGS}"
+            echo '```'
+            echo
+            echo "**Verify this image came from this commit:**"
+            echo '```'
+            echo "gh attestation verify oci://${IMAGE}@${DIGEST} --repo ${REPO}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
