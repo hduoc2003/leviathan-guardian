@@ -6,7 +6,7 @@
 # The cargo-chef and sccache caches are BuildKit cache mounts, so they never
 # reach an image layer - but a clean-room verification build must clear them.
 
-FROM rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 AS chef
+FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS chef
 
 # Install protobuf compiler (pinned to upstream 3.21.12; the Debian
 # packaging revision floats so point-release rebuilds don't break the build)
@@ -102,7 +102,7 @@ RUN --mount=type=secret,id=gitea_token \
     rm -f /root/.gitconfig
 
 # Runtime stage
-FROM debian:bookworm-slim@sha256:7e490910eea2861b9664577a96b54ce68ea3e02ce7f51d89cb0103a6f9c386e0 AS benchmark-runner
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS benchmark-runner
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
@@ -116,7 +116,7 @@ COPY --from=benchmark-builder /app/crates/contracts/masm /app/crates/contracts/m
 ENTRYPOINT ["/app/guardian-prod-benchmarks"]
 
 # Runtime stage
-FROM debian:bookworm-slim@sha256:7e490910eea2861b9664577a96b54ce68ea3e02ce7f51d89cb0103a6f9c386e0 AS server-runner
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS server-runner
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
