@@ -11,6 +11,11 @@ pub mod postgres;
 pub use auth::{Auth, AuthHeader, Credentials, ExtractCredentials};
 pub use network::{MidenNetworkType, NetworkConfig};
 
+/// Per-account replay floor retained when legacy account-scoped state is
+/// expanded to signer-scoped rows. It protects signers that were absent during
+/// migration and are authorized again later.
+pub const LEGACY_ACCOUNT_AUTH_FLOOR: &str = "__legacy_account_floor__";
+
 /// Metadata for a single account
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AccountMetadata {
@@ -104,6 +109,44 @@ pub trait MetadataStore: Send + Sync {
         paused: Option<bool>,
     ) -> Result<Vec<AccountMetadata>, String>;
 
+    /// Every account's metadata, read in bounded pages of `page_size`
+    /// through [`Self::list_paged`] (indexed on Postgres). Backends that
+    /// hold the inventory in memory override this with a single
+    /// snapshot instead of re-scanning per page. Used by the
+    /// `/dashboard/stats` refresher; the `(updated_at, account_id)`
+    /// cursor may skip a row bumped past it mid-walk, which the caller
+    /// reconciles against [`Self::list`].
+    async fn list_all(&self, page_size: u32) -> Result<Vec<AccountMetadata>, String> {
+        let page_size = page_size.max(1);
+        let mut out = Vec::new();
+        let mut cursor: Option<AccountListCursor> = None;
+        loop {
+            let page = self.list_paged(page_size, cursor.take(), None).await?;
+            let page_len = page.len();
+            let last = page
+                .last()
+                .map(|m| (m.updated_at.clone(), m.account_id.clone()));
+            out.extend(page);
+            if page_len < page_size as usize {
+                break;
+            }
+            match last.and_then(|(updated_at, account_id)| {
+                DateTime::parse_from_rfc3339(&updated_at)
+                    .ok()
+                    .map(|ts| AccountListCursor {
+                        last_updated_at: ts.with_timezone(&Utc),
+                        last_account_id: account_id,
+                    })
+            }) {
+                Some(next) => cursor = Some(next),
+                // Cannot continue from an unparseable timestamp; the
+                // caller's id reconciliation fills any gap.
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
     /// Update the authentication configuration for an account
     async fn update_auth(&self, account_id: &str, new_auth: Auth, now: &str) -> Result<(), String> {
         let mut metadata = self
@@ -177,9 +220,17 @@ pub trait MetadataStore: Send + Sync {
     /// replay signal, which must never surface as `Err`; `Err` is reserved for
     /// storage failure. Replay state is owned exclusively by this method: no other
     /// store operation may read or write it, and it must not affect `updated_at`.
+    ///
+    /// Scope is per `(account_id, signer_commitment)` (issue #367): independent
+    /// authorized cosigners never contend on one timestamp, while a replay of a
+    /// request from the same signer is still rejected: every accepted request
+    /// advances its own signer's record, so a captured request can never win the
+    /// CAS again. A migrated account-level floor is also consulted for signers
+    /// first seen after migration, including signers removed and later restored.
     async fn update_last_auth_timestamp_cas(
         &self,
         account_id: &str,
+        signer_commitment: &str,
         new_timestamp: i64,
     ) -> Result<bool, String>;
 

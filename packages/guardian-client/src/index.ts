@@ -1,4 +1,4 @@
-export { GuardianHttpClient, GuardianHttpError, GuardianTransportError } from './http.js';
+export { GuardianHttpClient, GuardianHttpError } from './http.js';
 export type { GuardianErrorMeta } from './http.js';
 export {
   GUARDIAN_ERROR_CODES,
@@ -34,4 +34,14 @@ export type {
   SignProposalRequest,
   LookupAccount,
   LookupResponse,
+  HistoryDecodeSection,
+  HistoryDecodeWarning,
+  HistoryEntry,
+  HistoryEntryStatus,
+  HistoryNote,
+  HistoryNoteAsset,
+  HistoryNoteTag,
+  HistoryNoteVisibility,
+  HistoryOptions,
+  HistoryPage,
 } from './types.js';

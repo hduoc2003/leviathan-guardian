@@ -1,6 +1,7 @@
 //! Proposal types and utilities for multisig transactions.
 
 use std::collections::HashSet;
+use std::num::NonZeroU32;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -8,6 +9,7 @@ use guardian_client::DeltaObject;
 use guardian_shared::FromJson;
 use guardian_shared::hex::FromHex;
 use guardian_shared::{ProposalSignature, SignatureScheme};
+use miden_protocol::Word;
 use miden_protocol::account::AccountId;
 use miden_protocol::crypto::dsa::ecdsa_k256_keccak::{
     PublicKey as EcdsaPublicKey, Signature as EcdsaSignature,
@@ -16,7 +18,6 @@ use miden_protocol::crypto::dsa::falcon512_poseidon2::Signature as Poseidon2Falc
 use miden_protocol::note::{Note, NoteId, NoteType};
 use miden_protocol::transaction::TransactionSummary;
 use miden_protocol::utils::serde::{Deserializable, Serializable};
-use miden_protocol::{Felt, Word};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -64,6 +65,29 @@ impl SerializedNote {
     }
 }
 
+/// P2IDE execution constraints for a P2ID transfer (issue #366).
+///
+/// Presence of either height creates a P2IDE note instead of a plain P2ID
+/// note; both `None` (the [`Default`]) means plain P2ID. `NonZeroU32` makes
+/// the invalid zero height unrepresentable — `0` is the on-chain encoding
+/// for "no constraint", so a zero here could silently build an
+/// unconstrained note — and serde rejects a wire `0` at parse time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct P2ideHeights {
+    /// Absolute block height at which the sender may reclaim the note.
+    pub reclaim: Option<NonZeroU32>,
+    /// Absolute block height before which the note cannot be consumed.
+    pub timelock: Option<NonZeroU32>,
+}
+
+impl P2ideHeights {
+    /// Returns true when either constraint is set, i.e. the transfer
+    /// creates a P2IDE note instead of a plain P2ID note.
+    pub fn is_p2ide(&self) -> bool {
+        self.reclaim.is_some() || self.timelock.is_some()
+    }
+}
+
 /// Status of a proposal in the signing workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProposalStatus {
@@ -97,6 +121,10 @@ pub enum TransactionType {
         /// Visibility of the created note (issue #322). Absent in legacy
         /// proposal metadata, which maps to [`NoteType::Public`].
         note_type: NoteType,
+        /// P2IDE reclaim/timelock constraints (issue #366). The default
+        /// (both `None`) is a plain P2ID note, the shape of pre-#366
+        /// proposals.
+        heights: P2ideHeights,
     },
     ConsumeNotes {
         note_ids: Vec<NoteId>,
@@ -151,6 +179,26 @@ impl TransactionType {
             faucet_id,
             amount,
             note_type,
+            heights: P2ideHeights::default(),
+        }
+    }
+
+    /// Creates a P2IDE transfer transaction: a P2ID note with optional
+    /// reclaim and/or timelock block heights (issue #366). Passing
+    /// `P2ideHeights::default()` degenerates to a plain P2ID transfer.
+    pub fn transfer_p2ide(
+        recipient: AccountId,
+        faucet_id: AccountId,
+        amount: u64,
+        note_type: NoteType,
+        heights: P2ideHeights,
+    ) -> Self {
+        Self::P2ID {
+            recipient,
+            faucet_id,
+            amount,
+            note_type,
+            heights,
         }
     }
 
@@ -175,6 +223,25 @@ impl TransactionType {
     /// Creates an AddCosigner transaction.
     pub fn add_cosigner(new_commitment: Word) -> Self {
         Self::AddCosigner { new_commitment }
+    }
+
+    /// Returns the signer-set size this transaction produces, given the
+    /// current size, or `None` when the transaction does not change the
+    /// signer set. Used to detect growth that dilutes per-procedure
+    /// threshold overrides (absolute counts, never re-scaled on-chain).
+    pub fn target_signer_count(&self, current_num_signers: u32) -> Option<u32> {
+        match self {
+            Self::AddCosigner { .. } => Some(current_num_signers + 1),
+            Self::RemoveCosigner { .. } => Some(current_num_signers.saturating_sub(1)),
+            Self::UpdateSigners {
+                signer_commitments, ..
+            } => Some(signer_commitments.len() as u32),
+            Self::P2ID { .. }
+            | Self::ConsumeNotes { .. }
+            | Self::SwitchGuardian { .. }
+            | Self::UpdateProcedureThreshold { .. }
+            | Self::Custom => None,
+        }
     }
 
     /// Creates a RemoveCosigner transaction.
@@ -280,6 +347,13 @@ pub struct ProposalMetadata {
     /// `None` => public, the wire shape of pre-#322 proposals.
     pub note_type: Option<String>,
 
+    /// P2IDE reclaim block height (issue #366). Presence of either height
+    /// means the proposal creates a P2IDE note; both `None` => plain P2ID.
+    /// `NonZeroU32`: a wire `0` is rejected at deserialization.
+    pub reclaim_height: Option<NonZeroU32>,
+    /// P2IDE timelock block height (issue #366).
+    pub timelock_height: Option<NonZeroU32>,
+
     pub note_ids_hex: Vec<String>,
 
     /// `consume_notes` metadata version. `None` => v1, `Some(2)` => v2.
@@ -295,6 +369,12 @@ pub struct ProposalMetadata {
 
     pub required_signatures: Option<usize>,
     pub signers: Vec<String>,
+
+    /// Base64-serialized Miden `ChainAnchor` pinning the reference block the
+    /// tx_summary was built at. Required to verify or execute the proposal:
+    /// since protocol 0.16 the signed summary binds the reference block
+    /// commitment, so it only reproduces when re-executed at that block.
+    pub chain_anchor_b64: Option<String>,
 }
 
 impl ProposalMetadata {
@@ -306,12 +386,35 @@ impl ProposalMetadata {
         self.consume_notes_metadata_version == Some(CONSUME_NOTES_METADATA_VERSION_V2)
     }
 
+    /// Decodes the proposal's chain anchor. Errors when absent: a proposal
+    /// without an anchor was created at an unknown reference block, so its
+    /// signed summary cannot be reproduced, verified, or executed.
+    pub fn chain_anchor(&self) -> Result<miden_client::transaction::ChainAnchor> {
+        let anchor_b64 = self.chain_anchor_b64.as_deref().ok_or_else(|| {
+            MultisigError::InvalidConfig(
+                "proposal metadata has no chain_anchor; it was created without \
+                 chain-anchored execution and its signed summary cannot be \
+                 reproduced at the original reference block"
+                    .to_string(),
+            )
+        })?;
+        crate::transaction::chain_anchor_from_base64(anchor_b64)
+    }
+
     /// Converts salt hex to Word.
+    ///
+    /// Errors when absent, for the same reason [`Self::chain_anchor`] does: the salt
+    /// is bound into the auth args and the signed summary, so a substituted zero
+    /// would rebuild a request whose summary no cosigner signed.
     pub fn salt(&self) -> Result<Word> {
-        match &self.salt_hex {
-            Some(value) => word_from_hex(value).map_err(MultisigError::InvalidConfig),
-            None => Ok(Word::from([Felt::new(0); 4])),
-        }
+        let value = self.salt_hex.as_deref().ok_or_else(|| {
+            MultisigError::InvalidConfig(
+                "proposal metadata has no salt; its request cannot be rebuilt without the \
+                 salt the auth args and summary bind"
+                    .to_string(),
+            )
+        })?;
+        word_from_hex(value).map_err(MultisigError::InvalidConfig)
     }
 
     /// Converts signer commitments to Words.
@@ -408,6 +511,10 @@ impl ProposalMetadata {
                     faucet_id,
                     amount: parsed_amount,
                     note_type: self.p2id_note_type()?,
+                    heights: P2ideHeights {
+                        reclaim: self.reclaim_height,
+                        timelock: self.timelock_height,
+                    },
                 })
             }
             "switch_guardian" => {
@@ -572,6 +679,56 @@ pub struct Proposal {
     pub tx_summary: TransactionSummary,
     pub signatures: Vec<ProposalSignatureEntry>,
     pub metadata: ProposalMetadata,
+    /// Result of the last summary-binding check on this value. Only
+    /// `verify_proposal_summary_binding` writes `Verified`; a freshly parsed,
+    /// imported, or built proposal is `Unchecked`. A listing surfaces failed
+    /// proposals instead of failing wholesale (issue #462); signing and
+    /// executing re-verify and refuse them.
+    pub verification: ProposalVerification,
+}
+
+/// Outcome of checking a proposal's metadata against its signed summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProposalVerification {
+    /// Nobody has run the check on this value yet.
+    Unchecked,
+    /// The metadata reproduced the signed summary commitment.
+    Verified,
+    /// The check failed. `retryable` is true when the failure came from a
+    /// transient node or RPC error, so the same proposal may verify on a
+    /// later attempt; false when the proposal itself cannot be reproduced
+    /// (tampered metadata, an anchor block the node has pruned) and it has
+    /// to be re-proposed.
+    Failed { retryable: bool, message: String },
+}
+
+impl ProposalVerification {
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Self::Verified)
+    }
+
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+
+    /// True for a failure worth retrying as-is (transient node/RPC error).
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Failed {
+                retryable: true,
+                ..
+            }
+        )
+    }
+
+    /// The failure message, if the check failed.
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::Failed { message, .. } => Some(message),
+            _ => None,
+        }
+    }
 }
 
 impl Proposal {
@@ -615,6 +772,8 @@ impl Proposal {
             None => None,
         };
         let note_type = metadata_payload.note_type;
+        let reclaim_height = metadata_payload.reclaim_height;
+        let timelock_height = metadata_payload.timelock_height;
         let note_ids_hex = metadata_payload.note_ids;
         let consume_notes_metadata_version = metadata_payload.consume_notes_metadata_version;
         let consume_notes_notes = metadata_payload
@@ -637,6 +796,8 @@ impl Proposal {
             faucet_id_hex: faucet_id_hex.clone(),
             amount,
             note_type,
+            reclaim_height,
+            timelock_height,
             note_ids_hex: note_ids_hex.clone(),
             consume_notes_metadata_version,
             consume_notes_notes,
@@ -645,6 +806,7 @@ impl Proposal {
             target_procedure: target_procedure.clone(),
             required_signatures: Some(required_signatures),
             signers: Vec::new(),
+            chain_anchor_b64: metadata_payload.chain_anchor,
         };
         let transaction_type = metadata.to_transaction_type(&proposal_type)?;
 
@@ -695,6 +857,7 @@ impl Proposal {
             tx_summary,
             signatures,
             metadata,
+            verification: ProposalVerification::Unchecked,
         };
         proposal.refresh_status();
         Ok(proposal)
@@ -728,9 +891,23 @@ impl Proposal {
             tx_summary,
             signatures: Vec::new(),
             metadata,
+            verification: ProposalVerification::Unchecked,
         };
         proposal.refresh_status();
         proposal
+    }
+
+    /// True when the summary-binding check reproduced this proposal's signed
+    /// summary from its metadata (see [`Proposal::verification`]).
+    pub fn is_verified(&self) -> bool {
+        self.verification.is_verified()
+    }
+
+    /// True when the proposal is both verified and has met its signature
+    /// threshold, i.e. it can be executed. `status` alone keeps meaning
+    /// "threshold met": a fully signed proposal can still be dead.
+    pub fn is_actionable(&self) -> bool {
+        self.is_verified() && self.status.is_ready()
     }
 
     pub fn has_signed(&self, signer_commitment_hex: &str) -> bool {
@@ -799,17 +976,21 @@ fn word_to_bytes(word: &Word) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use miden_protocol::Felt;
+
     use super::*;
-    use miden_protocol::account::delta::{AccountDelta, AccountStorageDelta, AccountVaultDelta};
-    use miden_protocol::transaction::{InputNotes, RawOutputNotes};
+    use miden_protocol::account::AccountStoragePatch;
+    use miden_protocol::account::delta::{AccountDelta, AccountVaultDelta};
+    use miden_protocol::transaction::{InputNotes, RawOutputNotes, TransactionSummaryUserParams};
 
     fn create_test_tx_summary() -> TransactionSummary {
         // Use a minimal valid account ID
-        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
+        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
         let delta = AccountDelta::new(
             account_id,
-            AccountStorageDelta::default(),
+            AccountStoragePatch::default(),
             AccountVaultDelta::default(),
+            None,
             Felt::ZERO,
         )
         .expect("Valid empty delta");
@@ -818,7 +999,10 @@ mod tests {
             delta,
             InputNotes::new(Vec::new()).unwrap(),
             RawOutputNotes::new(Vec::new()).unwrap(),
+            miden_protocol::block::BlockNumber::from(0),
             Word::default(),
+            0,
+            TransactionSummaryUserParams::new([Felt::ZERO; 6]),
         )
     }
 
@@ -838,6 +1022,37 @@ mod tests {
         assert!(err.contains("invalid field element"));
     }
 
+    /// A proposal without an anchor cannot be verified or executed, and a
+    /// present anchor must decode as a structurally valid `ChainAnchor` —
+    /// garbage base64 or well-formed base64 of non-anchor bytes are both
+    /// rejected before anything executes against them.
+    #[test]
+    fn chain_anchor_is_required_and_validated() {
+        let missing = ProposalMetadata::default();
+        let err = missing
+            .chain_anchor()
+            .expect_err("missing anchor must fail");
+        assert!(err.to_string().contains("no chain_anchor"));
+
+        let garbage = ProposalMetadata {
+            chain_anchor_b64: Some("!!!not-base64!!!".to_string()),
+            ..Default::default()
+        };
+        let err = garbage
+            .chain_anchor()
+            .expect_err("garbage base64 must fail");
+        assert!(err.to_string().contains("invalid chain_anchor base64"));
+
+        let non_anchor = ProposalMetadata {
+            chain_anchor_b64: Some(BASE64.encode([0xAAu8; 16])),
+            ..Default::default()
+        };
+        let err = non_anchor
+            .chain_anchor()
+            .expect_err("non-anchor bytes must fail");
+        assert!(err.to_string().contains("invalid chain_anchor"));
+    }
+
     #[test]
     fn test_proposal_status_checks() {
         let pending = ProposalStatus::Pending;
@@ -852,8 +1067,8 @@ mod tests {
     #[test]
     fn test_transaction_type_transfer() {
         // Use valid Miden AccountId format
-        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
-        let faucet_id = AccountId::from_hex("0x7c7c7c7c7c7c7c907c7c7c7c7c7c7c").unwrap();
+        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let faucet_id = AccountId::from_hex("0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c").unwrap();
         let amount = 1000u64;
 
         let tx = TransactionType::transfer(recipient, faucet_id, amount);
@@ -865,6 +1080,7 @@ mod tests {
                 faucet_id,
                 amount,
                 note_type: NoteType::Public,
+                heights: P2ideHeights::default(),
             }
         );
     }
@@ -953,8 +1169,8 @@ mod tests {
 
     #[test]
     fn test_transaction_type_requires_guardian_ack() {
-        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
-        let faucet_id = AccountId::from_hex("0x7c7c7c7c7c7c7c907c7c7c7c7c7c7c").unwrap();
+        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let faucet_id = AccountId::from_hex("0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c").unwrap();
 
         assert!(TransactionType::transfer(recipient, faucet_id, 1).requires_guardian_ack());
         assert!(
@@ -994,6 +1210,7 @@ mod tests {
                 ],
                 ..Default::default()
             },
+            verification: ProposalVerification::Unchecked,
         };
 
         assert_eq!(proposal.signature_counts(), (1, 3));
@@ -1020,6 +1237,7 @@ mod tests {
                 ],
                 ..Default::default()
             },
+            verification: ProposalVerification::Unchecked,
         };
 
         let missing = proposal.missing_signers();
@@ -1046,6 +1264,7 @@ mod tests {
                 signers: vec!["0xabc".to_string(), "0xdef".to_string()],
                 ..Default::default()
             },
+            verification: ProposalVerification::Unchecked,
         };
 
         assert_eq!(proposal.signatures_needed(), 0);
@@ -1228,11 +1447,18 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_salt_none_returns_default() {
+    fn test_metadata_salt_none_is_an_error() {
+        // It used to answer `Word::default()`. The request now declares this salt and
+        // miden-client commits `hash(CONVERSION_INFO || SALT)` from it, so a substituted
+        // zero would be committed as readily as the real one and reproduce a summary no
+        // cosigner ever signed. Absent has no correct answer; say so.
         let metadata = ProposalMetadata::default();
 
-        let salt = metadata.salt().expect("salt should return default");
-        assert_eq!(salt, Word::default());
+        let error = metadata.salt().expect_err("an absent salt has no default");
+        assert!(
+            error.to_string().contains("no salt"),
+            "the error must name the missing salt, got: {error}"
+        );
     }
 
     #[test]
@@ -1300,8 +1526,8 @@ mod tests {
 
     fn p2id_metadata(note_type: Option<&str>) -> ProposalMetadata {
         ProposalMetadata {
-            recipient_hex: Some("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string()),
-            faucet_id_hex: Some("0x7c7c7c7c7c7c7c907c7c7c7c7c7c7c".to_string()),
+            recipient_hex: Some("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string()),
+            faucet_id_hex: Some("0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c".to_string()),
             amount: Some(1000),
             note_type: note_type.map(str::to_string),
             ..Default::default()
@@ -1347,6 +1573,43 @@ mod tests {
             .to_transaction_type("p2id")
             .expect_err("unknown note_type must be rejected");
         assert!(err.to_string().contains("unsupported metadata.note_type"));
+    }
+
+    /// Absent heights must keep mapping to a plain P2ID note — the only
+    /// behavior that existed before the fields, so pre-#366 proposals
+    /// rebuild identically (issue #366).
+    #[test]
+    fn to_transaction_type_p2id_defaults_to_no_heights() {
+        let tx_type = p2id_metadata(None)
+            .to_transaction_type("p2id")
+            .expect("to_transaction_type");
+        assert!(matches!(
+            tx_type,
+            TransactionType::P2ID {
+                heights: P2ideHeights {
+                    reclaim: None,
+                    timelock: None,
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn to_transaction_type_p2id_threads_p2ide_heights() {
+        let metadata = ProposalMetadata {
+            reclaim_height: NonZeroU32::new(12345),
+            timelock_height: NonZeroU32::new(700),
+            ..p2id_metadata(None)
+        };
+        let tx_type = metadata
+            .to_transaction_type("p2id")
+            .expect("to_transaction_type");
+        let TransactionType::P2ID { heights, .. } = tx_type else {
+            panic!("expected a P2ID transaction");
+        };
+        assert_eq!(heights.reclaim, NonZeroU32::new(12345));
+        assert_eq!(heights.timelock, NonZeroU32::new(700));
     }
 
     #[test]

@@ -43,6 +43,7 @@ use miden_client::Client;
 use miden_client::keystore::FilesystemKeyStore;
 
 mod account;
+mod address;
 mod builder;
 mod client;
 mod error;
@@ -64,8 +65,12 @@ pub(crate) type MidenSdkClient = Client<FilesystemKeyStore>;
 pub use builder::MultisigClientBuilder;
 pub use client::{AbandonRequestState, AbandonStatus};
 pub use client::{
-    ConsumableNote, MultisigClient, NoteFilter, ProposalResult, RecoveredAccount,
-    StateVerificationResult,
+    BlockRange, ConsumableNote, HistoryAssetKind, HistoryDecodeSection, HistoryDecodeWarning,
+    HistoryEntry, HistoryEntryStatus, HistoryNote, HistoryNoteAsset, HistoryNoteTag,
+    HistoryNoteVisibility, HistoryPage, MultisigClient, NoteFilter, NoteImportOutcome,
+    NoteImportSource, NoteImportStatus, NoteRecoveryOptions, NoteRecoveryReport, ProposalResult,
+    PublicBackfillOptions, PublicBackfillReport, RecoveredAccount, RecoveryStep,
+    RecoveryStepProblem, StateVerificationResult, TransportRecoveryReport, TransportRecoveryStatus,
 };
 
 // Procedures
@@ -73,6 +78,7 @@ pub use procedures::{ProcedureName, ProcedureThreshold};
 
 // Account types
 pub use account::MultisigAccount;
+pub use address::{parse_account_address, parse_account_id};
 
 // Key management and hex utilities
 pub use keystore::{
@@ -91,15 +97,19 @@ pub use keystore::{
 
 // Proposals
 pub use execution::{SignatureAdvice, build_transfer_asset};
+pub use miden_standards::account::auth::MultisigAuthArgs;
 pub use payload::{ProposalMetadataPayload, ProposalPayload};
 pub use proposal::{
-    CONSUME_NOTES_METADATA_VERSION_V2, MAX_CONSUME_NOTES_METADATA_BYTES, Proposal,
-    ProposalMetadata, ProposalStatus, SerializedNote, TransactionType,
+    CONSUME_NOTES_METADATA_VERSION_V2, MAX_CONSUME_NOTES_METADATA_BYTES, P2ideHeights, Proposal,
+    ProposalMetadata, ProposalStatus, ProposalVerification, SerializedNote, TransactionType,
 };
 pub use prover::{ProverConfig, ProverRetryPolicy};
 pub use rpc::{RpcConfig, RpcRetryPolicy};
 pub use transaction::{
-    ProposalBuilder, build_p2id_transaction_request, deserialize_transaction_request, generate_salt,
+    MAX_APPROVAL_EXPIRATION_DELTA, ProposalBuilder, ProposalOptions, TransactionRequestBuilderExt,
+    build_p2id_transaction_request, deserialize_transaction_request, generate_salt,
+    multisig_auth_args, proposal_auth_args, proposer_auth_args,
+    summary_approval_expiration_block_num, summary_salt, synced_fee_faucet_id,
 };
 
 // Export/Import
@@ -114,6 +124,6 @@ pub use miden_client::rpc::Endpoint;
 pub use miden_protocol::Word;
 pub use miden_protocol::account::AccountId;
 pub use miden_protocol::asset::Asset;
-pub use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey as EcdsaSecretKey;
+pub use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SigningKey as EcdsaSecretKey;
 pub use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
 pub use miden_protocol::note::{NoteId, NoteType};

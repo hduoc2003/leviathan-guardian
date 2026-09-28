@@ -14,19 +14,19 @@ Pick the target before picking a workflow. All three are valid smoke targets —
 | Target | GUARDIAN endpoint | Miden RPC | When to use |
 | --- | --- | --- | --- |
 | **Local dev** | `http://localhost:50051` (gRPC) or `http://localhost:3000` (HTTP) | `http://localhost:57291` or devnet | default for in-repo changes not yet released |
-| **Staging (devnet)** | `https://guardian-stg.openzeppelin.com` | `https://rpc.devnet.miden.io` | verify a candidate before release; mirrors prod topology on devnet |
-| **Production (testnet)** | `https://guardian.openzeppelin.com` | `https://rpc.testnet.miden.io` | smoke the published SDK version against live prod |
+| **Staging (devnet)** | `https://guardian-devnet.openzeppelin.com` | `https://rpc.devnet.miden.io` | verify a candidate before release; mirrors prod topology on devnet |
+| **Production (testnet)** | `https://guardian-testnet.openzeppelin.com` | `https://rpc.testnet.miden.io` | smoke the published SDK version against live prod |
 
 Sanity-check the GUARDIAN target before every deployed-env run — a non-200 response or commitment mismatch means the ALB or server is unhealthy and blocks the rest of the canary:
 
 ```bash
-curl https://guardian.openzeppelin.com/pubkey
-curl 'https://guardian.openzeppelin.com/pubkey?scheme=ecdsa'
+curl https://guardian-testnet.openzeppelin.com/pubkey
+curl 'https://guardian-testnet.openzeppelin.com/pubkey?scheme=ecdsa'
 # staging
-curl https://guardian-stg.openzeppelin.com/pubkey
+curl https://guardian-devnet.openzeppelin.com/pubkey
 # gRPC over TLS (matches what the Rust SDK uses)
 grpcurl -import-path crates/server/proto -proto guardian.proto \
-  -d '{}' guardian.openzeppelin.com:443 guardian.Guardian/GetPubkey
+  -d '{}' guardian-testnet.openzeppelin.com:443 guardian.Guardian/GetPubkey
 ```
 
 Record the returned commitment — you'll paste it into the demo's "GUARDIAN commitment" prompt during `Switch GUARDIAN` canaries, and you'll use it to verify `s` output.
@@ -39,9 +39,9 @@ Record the returned commitment — you'll paste it into the demo's "GUARDIAN com
 2. Declare the published crates as registry dependencies pinned to the release under test:
    ```toml
    [dependencies]
-   miden-multisig-client = "0.15.1"
-   guardian-client       = "0.15.1"
-   miden-client          = "0.15.0"
+   miden-multisig-client = "0.16.0"
+   guardian-client       = "0.16.0"
+   miden-client          = "=0.16.0"
    tokio                 = { version = "1", features = ["full"] }
    ```
 3. Port or copy the exact menu/action code from `examples/demo/src/` into that scratch project. Keep the prompts identical so the workflows in `references/workflow-matrix.md` still apply verbatim.

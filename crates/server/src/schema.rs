@@ -92,12 +92,16 @@ diesel::table! {
 diesel::table! {
     /// Representation of the `account_auth_state` table.
     ///
-    /// Per-account replay-protection record, kept apart from
-    /// `account_metadata` so the per-request CAS rewrites a ~40-byte
-    /// tuple instead of the full metadata row.
-    account_auth_state (account_id) {
+    /// Per-(account, signer) replay-protection record, kept apart from
+    /// `account_metadata` so the per-request CAS rewrites two identifiers
+    /// and a timestamp instead of the full metadata row. Keyed per signer
+    /// commitment (issue #367) so independent cosigners never contend
+    /// on one timestamp.
+    account_auth_state (account_id, signer_commitment) {
         #[max_length = 128]
         account_id -> Varchar,
+        #[max_length = 128]
+        signer_commitment -> Varchar,
         last_auth_timestamp -> Int8,
     }
 }
@@ -148,6 +152,34 @@ diesel::table! {
         issued_at -> Timestamptz,
         expires_at -> Timestamptz,
         consumed_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    /// Representation of the `dashboard_stats_snapshots` table: the current
+    /// published `/dashboard/stats` aggregate (issue #371). Only the latest
+    /// version is retained; publication is fenced by `worker_leases`.
+    dashboard_stats_snapshots (version) {
+        version -> Int8,
+        fence_token -> Int8,
+        holder_id -> Text,
+        as_of -> Timestamptz,
+        published_at -> Timestamptz,
+        payload -> Jsonb,
+    }
+}
+
+diesel::table! {
+    /// Representation of the `dashboard_stats_control` singleton row:
+    /// operator-triggered refresh requests, in-progress marker, cooldown.
+    dashboard_stats_control (id) {
+        id -> Bool,
+        last_published_at -> Nullable<Timestamptz>,
+        refresh_requested_at -> Nullable<Timestamptz>,
+        refresh_requested_by -> Nullable<Text>,
+        refresh_started_at -> Nullable<Timestamptz>,
+        refresh_started_by -> Nullable<Text>,
+        last_operator_request_at -> Nullable<Timestamptz>,
     }
 }
 

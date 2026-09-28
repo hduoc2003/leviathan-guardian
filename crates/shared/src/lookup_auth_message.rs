@@ -100,7 +100,7 @@ mod tests {
     use super::*;
     use crate::auth_request_message::AuthRequestMessage;
     use crate::auth_request_payload::AuthRequestPayload;
-    use miden_protocol::account::{AccountId, AccountIdVersion, AccountStorageMode, AccountType};
+    use miden_protocol::account::{AccountId, AccountIdVersion, AccountType, AssetCallbackFlag};
 
     fn sample_commitment(seed: u32) -> Word {
         Word::from([
@@ -170,9 +170,9 @@ mod tests {
 
         let account_id = AccountId::dummy(
             [0x8a; 15],
-            AccountIdVersion::Version0,
-            AccountType::RegularAccountUpdatableCode,
-            AccountStorageMode::Private,
+            AccountIdVersion::Version1,
+            AccountType::Private,
+            AssetCallbackFlag::Disabled,
         );
         let payload = AuthRequestPayload::from_bytes(&commitment.as_bytes());
         let request_digest = AuthRequestMessage::new(account_id, timestamp, payload).to_word();

@@ -7,9 +7,9 @@ use guardian_shared::FromJson;
 use guardian_shared::SignatureScheme;
 use guardian_shared::ToJson;
 use miden_client::account::Account;
-use miden_client::rpc::domain::account::AccountStorageRequirements;
-use miden_client::rpc::{AccountStateAt, GrpcError, RpcError};
-use miden_client::transaction::{TransactionRequest, TransactionSummary};
+use miden_client::rpc::domain::account::GetAccountRequest;
+use miden_client::rpc::{GrpcError, RpcError};
+use miden_client::transaction::{ChainAnchor, TransactionRequest, TransactionSummary};
 use miden_protocol::Word;
 use miden_protocol::account::AccountId;
 use miden_protocol::utils::serde::Serializable;
@@ -20,8 +20,9 @@ use crate::builder::create_miden_client;
 use crate::error::{MultisigError, Result, error_chain};
 use crate::execution::build_final_transaction_request;
 use crate::keystore::word_from_hex;
-use crate::proposal::{Proposal, TransactionType};
+use crate::proposal::{Proposal, ProposalVerification, TransactionType};
 use crate::transaction::word_to_hex;
+use crate::transaction::{proposal_auth_args, summary_approval_expiration_block_num, summary_salt};
 
 /// True for note-less storage-config transactions, whose post-submit state miden-client persists
 /// incorrectly for private accounts, so local state must be rebuilt from the proven delta instead.
@@ -58,13 +59,7 @@ impl MultisigClient {
     ) -> Result<Word> {
         let rpc_client = self.node_rpc_client();
         let (_, proof) = rpc_client
-            .get_account_proof(
-                account_id,
-                AccountStorageRequirements::default(),
-                AccountStateAt::ChainTip,
-                None,
-                None,
-            )
+            .get_account(account_id, GetAccountRequest::new())
             .await
             .map_err(|e| match e {
                 RpcError::RequestError {
@@ -88,13 +83,7 @@ impl MultisigClient {
     ) -> Result<Option<Word>> {
         let rpc_client = self.node_rpc_client();
         match rpc_client
-            .get_account_proof(
-                account_id,
-                AccountStorageRequirements::default(),
-                AccountStateAt::ChainTip,
-                None,
-                None,
-            )
+            .get_account(account_id, GetAccountRequest::new())
             .await
         {
             Ok((_, proof)) => {
@@ -216,11 +205,27 @@ impl MultisigClient {
             .map_err(MultisigError::Signature)
     }
 
-    /// Verifies that a proposals metadata reconstructs the same tx_summary commitment.
+    /// Verifies that a proposal's metadata reconstructs the same tx_summary
+    /// commitment, and records the outcome on the proposal: `Verified`, or
+    /// `Failed` with the message and whether the failure looked transient.
+    /// Returns the error as well, so strict callers keep failing closed and
+    /// listings can keep going with the outcome recorded.
     pub(crate) async fn verify_proposal_summary_binding(
         &mut self,
-        proposal: &Proposal,
+        proposal: &mut Proposal,
     ) -> Result<()> {
+        let outcome = self.check_proposal_summary_binding(proposal).await;
+        proposal.verification = match &outcome {
+            Ok(()) => ProposalVerification::Verified,
+            Err(e) => ProposalVerification::Failed {
+                retryable: crate::rpc::is_transient_multisig_error(e),
+                message: e.to_string(),
+            },
+        };
+        outcome
+    }
+
+    async fn check_proposal_summary_binding(&mut self, proposal: &Proposal) -> Result<()> {
         let tx_summary_commitment = proposal.tx_summary.to_commitment();
 
         let proposal_id_commitment = word_to_hex(&tx_summary_commitment);
@@ -228,6 +233,19 @@ impl MultisigClient {
             return Err(MultisigError::InvalidConfig(format!(
                 "proposal id {} does not match tx_summary commitment {}",
                 proposal.id, proposal_id_commitment
+            )));
+        }
+
+        // The anchor arrives from an untrusted party via GUARDIAN, so check
+        // its block commitment against the one bound into the signed summary
+        // before anything executes against it. ChainAnchor deserialization
+        // already enforced internal header/chain consistency.
+        let chain_anchor = proposal.metadata.chain_anchor()?;
+        if chain_anchor.block_commitment() != proposal.tx_summary.block_commitment() {
+            return Err(MultisigError::InvalidConfig(format!(
+                "proposal {} chain_anchor does not match the block commitment bound \
+                 into its tx_summary",
+                proposal.id
             )));
         }
 
@@ -254,13 +272,45 @@ impl MultisigClient {
 
         let account = self.require_account()?.clone();
         let salt = proposal.metadata.salt()?;
+        if summary_salt(&proposal.tx_summary) != salt {
+            return Err(MultisigError::InvalidConfig(format!(
+                "proposal {} metadata salt does not match the salt bound into its tx_summary",
+                proposal.id
+            )));
+        }
         let signer_commitments = proposal.metadata.signer_commitments()?;
+        let auth_args =
+            proposal_auth_args(&self.miden_client, &proposal.tx_summary, &chain_anchor).await?;
+
+        // A consume-notes summary commits to *authenticated* consumption
+        // (see `ensure_notes_authenticated`), which miden-client decides
+        // from this store alone. Put the store in that mode before the
+        // rebuild, or a cosigner that never held these notes reproduces a
+        // different commitment (issue #409).
+        if let TransactionType::ConsumeNotes {
+            metadata_version: Some(crate::proposal::CONSUME_NOTES_METADATA_VERSION_V2),
+            notes,
+            ..
+        } = &proposal.transaction_type
+        {
+            let decoded = notes
+                .iter()
+                .map(crate::proposal::SerializedNote::to_note)
+                .collect::<Result<Vec<_>>>()?;
+            let node_rpc = self.node_rpc_client();
+            crate::transaction::ensure_notes_authenticated(
+                &mut self.miden_client,
+                &node_rpc,
+                &decoded,
+            )
+            .await?;
+        }
 
         let tx_request = build_final_transaction_request(
             &self.miden_client,
             &proposal.transaction_type,
             account.inner(),
-            salt,
+            &auth_args,
             Vec::new(),
             proposal.metadata.new_threshold,
             Some(signer_commitments.as_slice()),
@@ -268,10 +318,11 @@ impl MultisigClient {
         )
         .await?;
 
-        let reconstructed = crate::transaction::execute_for_summary(
+        let reconstructed = crate::transaction::execute_for_summary_at(
             &mut self.miden_client,
             account.id(),
             tx_request,
+            chain_anchor,
         )
         .await?;
 
@@ -282,6 +333,29 @@ impl MultisigClient {
             )));
         }
 
+        Ok(())
+    }
+
+    /// An expired approval aborts in the auth procedure only at execution.
+    /// The summary carries the deadline, so callers check it against the sync
+    /// height before assembling advice or requesting the GUARDIAN ack.
+    pub(crate) async fn assert_approval_not_expired(
+        &self,
+        proposal_id: &str,
+        summary: &TransactionSummary,
+    ) -> Result<()> {
+        let Some(expiration) = summary_approval_expiration_block_num(summary) else {
+            return Ok(());
+        };
+        let sync_height = self.miden_client.get_sync_height().await.map_err(|e| {
+            MultisigError::miden_client_with_context("failed to read the sync height", e)
+        })?;
+        if sync_height >= expiration {
+            return Err(MultisigError::InvalidConfig(format!(
+                "proposal {proposal_id} approval expired at block {expiration}; the chain is at \
+                 block {sync_height}, so the collected signatures no longer authorize it"
+            )));
+        }
         Ok(())
     }
 
@@ -321,13 +395,15 @@ impl MultisigClient {
         account_id: AccountId,
         tx_request: TransactionRequest,
         transaction_type: &TransactionType,
+        chain_anchor: ChainAnchor,
     ) -> Result<()> {
         if let TransactionType::SwitchGuardian {
             new_endpoint,
             new_commitment,
         } = transaction_type
         {
-            verify_endpoint_commitment(new_endpoint, *new_commitment).await?;
+            verify_endpoint_commitment(new_endpoint, *new_commitment, self.key_manager.scheme())
+                .await?;
         }
 
         let new_guardian_endpoint =
@@ -354,7 +430,7 @@ impl MultisigClient {
 
             let tx_result = self
                 .miden_client
-                .execute_transaction(account_id, tx_request)
+                .execute_transaction_at(account_id, tx_request, chain_anchor)
                 .await
                 .map_err(|e| {
                     MultisigError::transaction_execution_with_context(
@@ -384,19 +460,19 @@ impl MultisigClient {
                     )
                 })?;
 
-            let account_delta = tx_result.account_delta();
-            let rebuilt: Account = if account_delta.is_full_state() {
-                Account::try_from(account_delta).map_err(|e| {
+            let account_patch = tx_result.account_patch();
+            let rebuilt: Account = if account_patch.is_full_state() {
+                Account::try_from(account_patch).map_err(|e| {
                     MultisigError::MidenClient(format!(
-                        "failed to build account from full state delta: {}",
+                        "failed to build account from full state patch: {}",
                         e
                     ))
                 })?
             } else {
                 let mut acc = base_account;
-                acc.apply_delta(account_delta).map_err(|e| {
+                acc.apply_patch(account_patch).map_err(|e| {
                     MultisigError::MidenClient(format!(
-                        "failed to apply transaction delta to account: {}",
+                        "failed to apply transaction patch to account: {}",
                         e
                     ))
                 })?;
@@ -409,15 +485,8 @@ impl MultisigClient {
 
             rebuilt
         } else {
-            self.miden_client
-                .submit_new_transaction(account_id, tx_request)
-                .await
-                .map_err(|e| {
-                    MultisigError::transaction_execution_with_context(
-                        "transaction execution failed",
-                        e,
-                    )
-                })?;
+            self.submit_transaction_at(account_id, tx_request, chain_anchor)
+                .await?;
 
             let _ = self.miden_client.sync_state().await;
 
@@ -453,6 +522,65 @@ impl MultisigClient {
         Ok(())
     }
 
+    /// Executes a transaction at the given chain anchor's reference block,
+    /// proves it, submits it, and applies the resulting store update — the
+    /// anchored equivalent of miden-client's `submit_new_transaction`, which
+    /// always executes at the local sync height.
+    pub(crate) async fn submit_transaction_at(
+        &mut self,
+        account_id: AccountId,
+        tx_request: TransactionRequest,
+        chain_anchor: ChainAnchor,
+    ) -> Result<()> {
+        let tx_result = self
+            .miden_client
+            .execute_transaction_at(account_id, tx_request, chain_anchor)
+            .await
+            .map_err(|e| {
+                MultisigError::transaction_execution_with_context("transaction execution failed", e)
+            })?;
+
+        let proven = self
+            .miden_client
+            .prove_transaction(&tx_result)
+            .await
+            .map_err(|e| {
+                MultisigError::transaction_execution_with_context("transaction proving failed", e)
+            })?;
+
+        let submission_height = self
+            .miden_client
+            .submit_proven_transaction(proven, &tx_result)
+            .await
+            .map_err(|e| {
+                MultisigError::transaction_execution_with_context(
+                    "transaction submission failed",
+                    e,
+                )
+            })?;
+
+        let tx_update = self
+            .miden_client
+            .get_transaction_store_update(&tx_result, submission_height)
+            .await
+            .map_err(|e| {
+                MultisigError::MidenClient(format!(
+                    "failed to build store update for submitted transaction: {e}"
+                ))
+            })?;
+        self.miden_client
+            .apply_transaction_update(tx_update)
+            .await
+            .map_err(|e| {
+                MultisigError::transaction_execution_with_context(
+                    "failed to apply store update for submitted transaction",
+                    e,
+                )
+            })?;
+
+        Ok(())
+    }
+
     /// Resets the miden-client by creating a new instance with a fresh database.
     pub async fn reset_miden_client(&mut self) -> Result<()> {
         self.miden_client = create_miden_client(
@@ -467,10 +595,17 @@ impl MultisigClient {
     }
 
     /// Adds an account to miden-client if it doesn't exist, or updates it if it does.
+    ///
+    /// `overwrite` is forwarded to miden-client's `add_account` (its
+    /// parameter of the same name), but is currently inert: upstream only
+    /// consults it for already-tracked accounts, and the existence pre-check
+    /// here routes those through the update path, which always overwrites.
+    /// This helper never surfaces upstream's `overwrite: false` protection
+    /// (`AccountAlreadyTracked`).
     pub(crate) async fn add_or_update_account(
         &mut self,
         account: &Account,
-        imported: bool,
+        overwrite: bool,
     ) -> Result<()> {
         let account_id = account.id();
 
@@ -494,7 +629,7 @@ impl MultisigClient {
                 })?;
         } else {
             self.miden_client
-                .add_account(account, imported)
+                .add_account(account, overwrite)
                 .await
                 .map_err(|e| {
                     MultisigError::MidenClient(format!(
@@ -513,18 +648,22 @@ mod tests {
     use guardian_shared::FromJson;
     use guardian_shared::ToJson;
     use miden_protocol::account::AccountId;
-    use miden_protocol::account::delta::{AccountDelta, AccountStorageDelta, AccountVaultDelta};
-    use miden_protocol::transaction::{InputNotes, RawOutputNotes, TransactionSummary};
+    use miden_protocol::account::AccountStoragePatch;
+    use miden_protocol::account::delta::{AccountDelta, AccountVaultDelta};
+    use miden_protocol::transaction::{
+        InputNotes, RawOutputNotes, TransactionSummary, TransactionSummaryUserParams,
+    };
     use miden_protocol::{Felt, Word};
 
     use super::MultisigClient;
 
     fn tx_summary_json() -> serde_json::Value {
-        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
+        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
         let delta = AccountDelta::new(
             account_id,
-            AccountStorageDelta::default(),
+            AccountStoragePatch::default(),
             AccountVaultDelta::default(),
+            None,
             Felt::ZERO,
         )
         .unwrap();
@@ -532,7 +671,10 @@ mod tests {
             delta,
             InputNotes::new(Vec::new()).unwrap(),
             RawOutputNotes::new(Vec::new()).unwrap(),
+            miden_protocol::block::BlockNumber::from(0),
             Word::default(),
+            0,
+            TransactionSummaryUserParams::new([Felt::ZERO; 6]),
         )
         .to_json()
     }
@@ -565,10 +707,10 @@ mod tests {
 
     #[test]
     fn ensure_proposal_account_id_accepts_matching_account() {
-        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
+        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
 
         let result = MultisigClient::ensure_proposal_account_id(
-            "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b",
+            "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b",
             &account_id,
         );
 
@@ -577,17 +719,17 @@ mod tests {
 
     #[test]
     fn ensure_proposal_account_id_rejects_mismatched_account() {
-        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
+        let account_id = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
 
         let error = MultisigClient::ensure_proposal_account_id(
-            "0x8a8a8a8a8a8a8a900a8a8a8a8a8a8a",
+            "0x8a8a8a8a8a8a8a010a8a8a8a8a8a8a",
             &account_id,
         )
         .unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "invalid configuration: proposal is for account 0x8a8a8a8a8a8a8a900a8a8a8a8a8a8a instead of 0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b"
+            "invalid configuration: proposal is for account 0x8a8a8a8a8a8a8a010a8a8a8a8a8a8a instead of 0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b"
         );
     }
 }

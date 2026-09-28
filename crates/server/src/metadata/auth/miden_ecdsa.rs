@@ -10,6 +10,9 @@ use miden_protocol::utils::serde::{Deserializable, Serializable};
 /// fails or yields a commitment outside the authorized set, the server falls
 /// back to the caller-provided public key from `x-pubkey` for compatibility
 /// with wallet providers that use a different recovery encoding.
+///
+/// Returns the verified signer's public-key commitment (hex), which callers
+/// use to scope replay-protection state per signer.
 pub fn verify_request_signature(
     account_id: &str,
     timestamp: i64,
@@ -17,7 +20,7 @@ pub fn verify_request_signature(
     signature: &str,
     pubkey_hex: &str,
     request_payload: &AuthRequestPayload,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let message = account_id_timestamp_to_digest(account_id, timestamp, request_payload)?;
     let sig = parse_signature(signature)?;
 
@@ -36,7 +39,9 @@ pub fn verify_request_signature(
         &sig,
         &public_key,
         &commitment_hex,
-    )
+    )?;
+
+    Ok(commitment_hex)
 }
 
 /// Convert an account ID and timestamp to a message digest (Word)
@@ -199,21 +204,21 @@ fn verify_with_public_key(
 mod tests {
     use super::*;
     use miden_protocol::account::AccountId;
-    use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey;
+    use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SigningKey as SecretKey;
     use miden_protocol::utils::serde::Serializable;
 
     #[test]
     fn test_ecdsa_sign_and_verify_account_id_with_timestamp() {
-        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
 
         let account_id = AccountId::dummy(
             [0u8; 15],
-            AccountIdVersion::Version0,
-            AccountType::RegularAccountUpdatableCode,
-            AccountStorageMode::Private,
+            AccountIdVersion::Version1,
+            AccountType::Private,
+            miden_protocol::account::AssetCallbackFlag::Disabled,
         );
         let account_id_hex = account_id.to_hex();
         let timestamp: i64 = 1700000000;
@@ -248,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_ecdsa_verify_with_wrong_pubkey() {
-        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountType};
 
         let secret_key1 = SecretKey::new();
         let secret_key2 = SecretKey::new();
@@ -256,9 +261,9 @@ mod tests {
 
         let account_id = AccountId::dummy(
             [1u8; 15],
-            AccountIdVersion::Version0,
-            AccountType::RegularAccountUpdatableCode,
-            AccountStorageMode::Private,
+            AccountIdVersion::Version1,
+            AccountType::Private,
+            miden_protocol::account::AssetCallbackFlag::Disabled,
         );
         let account_id_hex = account_id.to_hex();
         let timestamp: i64 = 1700000000;
@@ -291,16 +296,16 @@ mod tests {
 
     #[test]
     fn test_ecdsa_verify_with_wrong_timestamp() {
-        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
 
         let account_id = AccountId::dummy(
             [4u8; 15],
-            AccountIdVersion::Version0,
-            AccountType::RegularAccountUpdatableCode,
-            AccountStorageMode::Private,
+            AccountIdVersion::Version1,
+            AccountType::Private,
+            miden_protocol::account::AssetCallbackFlag::Disabled,
         );
         let account_id_hex = account_id.to_hex();
         let timestamp1: i64 = 1700000000;
@@ -333,16 +338,16 @@ mod tests {
 
     #[test]
     fn test_ecdsa_verify_falls_back_to_provided_pubkey_when_recovery_commitment_mismatches() {
-        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
 
         let account_id = AccountId::dummy(
             [7u8; 15],
-            AccountIdVersion::Version0,
-            AccountType::RegularAccountUpdatableCode,
-            AccountStorageMode::Private,
+            AccountIdVersion::Version1,
+            AccountType::Private,
+            miden_protocol::account::AssetCallbackFlag::Disabled,
         );
         let account_id_hex = account_id.to_hex();
         let timestamp: i64 = 1700000000;
@@ -377,16 +382,16 @@ mod tests {
 
     #[test]
     fn test_ecdsa_verify_with_wrong_payload() {
-        use miden_protocol::account::{AccountIdVersion, AccountStorageMode, AccountType};
+        use miden_protocol::account::{AccountIdVersion, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
 
         let account_id = AccountId::dummy(
             [8u8; 15],
-            AccountIdVersion::Version0,
-            AccountType::RegularAccountUpdatableCode,
-            AccountStorageMode::Private,
+            AccountIdVersion::Version1,
+            AccountType::Private,
+            miden_protocol::account::AssetCallbackFlag::Disabled,
         );
         let account_id_hex = account_id.to_hex();
         let timestamp: i64 = 1700000000;

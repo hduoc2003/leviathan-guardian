@@ -6,9 +6,10 @@
 use miden_client::note::NoteConsumptionStatus;
 use miden_protocol::account::AccountId;
 use miden_protocol::asset::Asset;
+use miden_protocol::block::BlockNumber;
 use miden_protocol::crypto::rand::RandomCoin;
 use miden_protocol::note::NoteId;
-use miden_standards::note::P2idNote;
+use miden_standards::note::{P2idNote, P2ideNote};
 
 use super::MultisigClient;
 use crate::error::{MultisigError, Result};
@@ -28,20 +29,18 @@ impl ConsumableNote {
     pub fn amount_for_faucet(&self, faucet_id: AccountId) -> u64 {
         self.assets
             .iter()
-            .filter_map(|asset| match asset {
-                Asset::Fungible(fungible) if fungible.faucet_id() == faucet_id => {
-                    Some(fungible.amount())
-                }
-                _ => None,
-            })
+            .filter_map(|asset| asset.as_fungible())
+            .filter(|fungible| fungible.faucet_id() == faucet_id)
+            .map(|fungible| fungible.amount().as_u64())
             .sum()
     }
 
     /// Returns true if this note contains fungible assets from the specified faucet.
     pub fn has_faucet(&self, faucet_id: AccountId) -> bool {
-        self.assets.iter().any(|asset| match asset {
-            Asset::Fungible(fungible) => fungible.faucet_id() == faucet_id,
-            Asset::NonFungible(_) => false,
+        self.assets.iter().any(|asset| {
+            asset
+                .as_fungible()
+                .is_some_and(|fungible| fungible.faucet_id() == faucet_id)
         })
     }
 }
@@ -122,8 +121,8 @@ impl MultisigClient {
                         )
                 });
                 if can_consume_now {
-                    Some(ConsumableNote {
-                        id: record.id(),
+                    record.id().map(|id| ConsumableNote {
+                        id,
                         assets: record.assets().iter().cloned().collect(),
                     })
                 } else {
@@ -150,16 +149,16 @@ impl MultisigClient {
         let result = notes
             .into_iter()
             .filter(|(_, relevances)| relevances.iter().any(|(id, _)| *id == account_id))
-            .map(|(record, relevances)| {
+            .filter_map(|(record, relevances)| {
                 let note = ConsumableNote {
-                    id: record.id(),
+                    id: record.id()?,
                     assets: record.assets().iter().cloned().collect(),
                 };
                 let statuses: Vec<(AccountId, String)> = relevances
                     .into_iter()
                     .map(|(id, status)| (id, format!("{:?}", status)))
                     .collect();
-                (note, statuses)
+                Some((note, statuses))
             })
             .collect();
 
@@ -179,9 +178,11 @@ impl MultisigClient {
         let result = notes
             .into_iter()
             .filter(|(_, relevances)| relevances.iter().any(|(id, _)| *id == account_id))
-            .map(|(record, _)| ConsumableNote {
-                id: record.id(),
-                assets: record.assets().iter().cloned().collect(),
+            .filter_map(|(record, _)| {
+                Some(ConsumableNote {
+                    id: record.id()?,
+                    assets: record.assets().iter().cloned().collect(),
+                })
             })
             .collect();
 
@@ -253,6 +254,7 @@ impl MultisigClient {
             faucet_id,
             amount,
             note_type,
+            heights,
         } = &proposal.transaction_type
         else {
             return Err(MultisigError::UnsupportedTransactionType(
@@ -266,20 +268,39 @@ impl MultisigClient {
             ));
         }
         let salt = proposal.metadata.salt()?;
-        let asset = crate::execution::build_transfer_asset(account.inner(), *faucet_id, *amount)?;
+        let asset = crate::execution::build_transfer_asset(*faucet_id, *amount)?;
 
         let mut rng = RandomCoin::new(salt);
-        let note = P2idNote::create(
-            account.id(),
-            *recipient,
-            vec![asset.into()],
-            *note_type,
-            Default::default(),
-            &mut rng,
-        )
-        .map_err(|e| {
-            MultisigError::TransactionExecution(format!("failed to build P2ID note: {}", e))
-        })?;
+        let note: miden_protocol::note::Note = if heights.is_p2ide() {
+            P2ideNote::builder()
+                .sender(account.id())
+                .target(*recipient)
+                .maybe_reclaim_height(heights.reclaim.map(|h| BlockNumber::from(h.get())))
+                .maybe_timelock_height(heights.timelock.map(|h| BlockNumber::from(h.get())))
+                .asset(asset)
+                .note_type(*note_type)
+                .generate_serial_number(&mut rng)
+                .build()
+                .map_err(|e| {
+                    MultisigError::TransactionExecution(format!(
+                        "failed to build P2IDE note: {}",
+                        e
+                    ))
+                })?
+                .into()
+        } else {
+            P2idNote::builder()
+                .sender(account.id())
+                .target(*recipient)
+                .asset(asset)
+                .note_type(*note_type)
+                .generate_serial_number(&mut rng)
+                .build()
+                .map_err(|e| {
+                    MultisigError::TransactionExecution(format!("failed to build P2ID note: {}", e))
+                })?
+                .into()
+        };
 
         Ok(note.id())
     }
@@ -291,7 +312,7 @@ mod tests {
 
     // Use a regular account ID for filter validation tests (no FungibleAsset creation)
     fn test_account_id() -> AccountId {
-        AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap()
+        AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap()
     }
 
     #[test]

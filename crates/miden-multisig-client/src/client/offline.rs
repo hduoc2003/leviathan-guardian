@@ -5,8 +5,6 @@
 
 use std::collections::HashSet;
 
-use guardian_shared::ToJson;
-
 use super::MultisigClient;
 use crate::error::{MultisigError, Result};
 use crate::execution::{SignatureInput, build_final_transaction_request, collect_signature_advice};
@@ -14,6 +12,7 @@ use crate::export::{EXPORT_VERSION, ExportedMetadata, ExportedProposal, Exported
 use crate::guardian_endpoint::verify_endpoint_commitment;
 use crate::keystore::proposal_public_key_hex;
 use crate::proposal::TransactionType;
+use guardian_shared::ToJson;
 
 impl MultisigClient {
     /// Creates a proposal offline without pushing to GUARDIAN.
@@ -56,7 +55,12 @@ impl MultisigClient {
                 new_endpoint,
                 new_commitment,
             } => {
-                verify_endpoint_commitment(new_endpoint, *new_commitment).await?;
+                verify_endpoint_commitment(
+                    new_endpoint,
+                    *new_commitment,
+                    self.key_manager.scheme(),
+                )
+                .await?;
                 (new_endpoint.clone(), *new_commitment)
             }
             _ => {
@@ -66,22 +70,26 @@ impl MultisigClient {
             }
         };
 
+        let auth_args = self.multisig_auth_args(salt, None, None).await?;
         let tx_request = crate::transaction::build_update_guardian_transaction_request(
             new_commitment,
-            salt,
+            self.key_manager.scheme(),
+            &auth_args,
             std::iter::empty(),
         )?;
+
+        let (tx_summary, chain_anchor) =
+            crate::transaction::execute_for_summary(&mut self.miden_client, account_id, tx_request)
+                .await?;
+
         let metadata = ExportedMetadata {
             proposal_type: "switch_guardian".to_string(),
             salt_hex: Some(crate::transaction::word_to_hex(&salt)),
             new_guardian_pubkey_hex: Some(crate::transaction::word_to_hex(&new_commitment)),
             new_guardian_endpoint: Some(new_endpoint),
+            chain_anchor: Some(crate::transaction::chain_anchor_to_base64(&chain_anchor)),
             ..Default::default()
         };
-
-        let tx_summary =
-            crate::transaction::execute_for_summary(&mut self.miden_client, account_id, tx_request)
-                .await?;
 
         let tx_commitment = tx_summary.to_commitment();
         let signature_hex = self.key_manager.sign_word_hex(tx_commitment);
@@ -123,13 +131,13 @@ impl MultisigClient {
     /// std::fs::write("/tmp/proposal_signed.json", json)?;
     /// ```
     pub async fn sign_imported_proposal(&mut self, proposal: &mut ExportedProposal) -> Result<()> {
-        let bound_proposal = proposal.to_proposal()?;
+        let mut bound_proposal = proposal.to_proposal()?;
         if !bound_proposal.transaction_type.supports_offline_execution() {
             return Err(MultisigError::OfflineUnsupportedTransaction(
                 bound_proposal.transaction_type.type_name().to_string(),
             ));
         }
-        self.verify_proposal_summary_binding(&bound_proposal)
+        self.verify_proposal_summary_binding(&mut bound_proposal)
             .await?;
         let account = self.require_account()?;
         let account_id = account.id();
@@ -173,6 +181,12 @@ impl MultisigClient {
     ///
     /// Only `SwitchGuardian` transactions are supported in this mode.
     ///
+    /// Deliberately skips the pre-switch proposal-note import (issue #417):
+    /// it would contact the very GUARDIAN this flow exists to avoid. When
+    /// the old GUARDIAN is in fact still reachable, call
+    /// [`MultisigClient::preserve_pre_switch_proposal_notes`] before
+    /// executing.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -194,13 +208,13 @@ impl MultisigClient {
         }
 
         // Parse the proposal
-        let proposal = exported.to_proposal()?;
+        let mut proposal = exported.to_proposal()?;
         if !proposal.transaction_type.supports_offline_execution() {
             return Err(MultisigError::OfflineUnsupportedTransaction(
                 proposal.transaction_type.type_name().to_string(),
             ));
         }
-        self.verify_proposal_summary_binding(&proposal).await?;
+        self.verify_proposal_summary_binding(&mut proposal).await?;
         let tx_summary = proposal.tx_summary.clone();
         let tx_summary_commitment = tx_summary.to_commitment();
 
@@ -225,14 +239,24 @@ impl MultisigClient {
             tx_summary_commitment,
         )?;
 
-        // Build the final transaction request with all signatures
-        let salt = proposal.metadata.salt()?;
+        // Execute and finalize at the proposal's anchored reference block; the
+        // anchor was checked against the signed summary's block commitment in
+        // `verify_proposal_summary_binding` above.
+        let chain_anchor = proposal.metadata.chain_anchor()?;
+        self.assert_approval_not_expired(&proposal.id, &proposal.tx_summary)
+            .await?;
+        let auth_args = crate::transaction::proposal_auth_args(
+            &self.miden_client,
+            &proposal.tx_summary,
+            &chain_anchor,
+        )
+        .await?;
 
         let final_tx_request = build_final_transaction_request(
             &self.miden_client,
             &proposal.transaction_type,
             account.inner(),
-            salt,
+            &auth_args,
             signature_advice,
             None,
             None,
@@ -240,8 +264,20 @@ impl MultisigClient {
         )
         .await?;
 
-        // Execute and finalize
-        self.finalize_transaction(account_id, final_tx_request, &proposal.transaction_type)
-            .await
+        // Make the deliberate import skip observable rather than a silent
+        // loss when the old GUARDIAN was in fact still reachable.
+        tracing::warn!(
+            "offline switch execution skips the pre-switch proposal-note import; if the \
+             old GUARDIAN is still reachable, call preserve_pre_switch_proposal_notes \
+             before executing to keep notes embedded in its pending proposals"
+        );
+
+        self.finalize_transaction(
+            account_id,
+            final_tx_request,
+            &proposal.transaction_type,
+            chain_anchor,
+        )
+        .await
     }
 }

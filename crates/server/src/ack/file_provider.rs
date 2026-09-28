@@ -15,7 +15,7 @@
 use crate::error::{GuardianError, Result};
 use crate::secret::{SecretBytes, SecretString};
 use async_trait::async_trait;
-use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey as EcdsaSecretKey;
+use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SigningKey as EcdsaSecretKey;
 use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey as FalconSecretKey;
 use miden_protocol::utils::serde::{Deserializable, Serializable};
 use std::path::{Path, PathBuf};

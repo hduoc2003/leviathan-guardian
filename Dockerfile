@@ -6,7 +6,7 @@
 # The cargo-chef and sccache caches are BuildKit cache mounts, so they never
 # reach an image layer - but a clean-room verification build must clear them.
 
-FROM rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 AS chef
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS chef
 
 # Install protobuf compiler (pinned to upstream 3.21.12; the Debian
 # packaging revision floats so point-release rebuilds don't break the build)
@@ -72,9 +72,9 @@ RUN --mount=type=secret,id=gitea_token \
     --mount=type=cache,target=/sccache,sharing=locked \
     git config --global url."https://oauth2:$(cat /run/secrets/gitea_token)@git.softly.com/".insteadOf "https://git.softly.com/" && \
     if [ -n "$GUARDIAN_SERVER_FEATURES" ]; then \
-      cargo build --release --locked --package guardian-server --bin server --features "$GUARDIAN_SERVER_FEATURES"; \
+      cargo build --release --locked --package guardian-server --bin server --bin ack-keygen --features "$GUARDIAN_SERVER_FEATURES"; \
     else \
-      cargo build --release --locked --package guardian-server --bin server; \
+      cargo build --release --locked --package guardian-server --bin server --bin ack-keygen; \
     fi && \
     rm -f /root/.gitconfig
 
@@ -126,8 +126,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy the binary from builder
+# Copy the server and the ACK identity generator from builder. ack-keygen lets a
+# self-managed deployment mint its stable identity from the image alone:
+#   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/ack-keys:/out" <image> /app/ack-keygen --out-dir /out
 COPY --from=server-builder /app/target/release/server /app/server
+COPY --from=server-builder /app/target/release/ack-keygen /app/ack-keygen
 
 # Expose HTTP and gRPC ports
 EXPOSE 3000 50051

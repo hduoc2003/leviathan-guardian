@@ -172,8 +172,51 @@ locals {
   database_sslparams       = local.ca_bundle_enabled ? "sslmode=verify-full&sslrootcert=${local.ca_bundle_container_path}" : "sslmode=require"
   database_url             = "postgres://${urlencode(local.postgres_user)}:${urlencode(local.rds_master_password)}@${local.database_endpoint}:${local.postgres_port}/${local.postgres_db}?${local.database_sslparams}"
 
+  # Observability: ADOT sidecar scraping the in-task Prometheus endpoint into
+  # CloudWatch EMF. The endpoint binds loopback: Fargate awsvpc containers
+  # share one network namespace, so the sidecar reaches it on 127.0.0.1 while
+  # nothing outside the task can, regardless of security-group contents.
+  metrics_port      = 9464
+  metrics_path      = "/metrics"
+  metrics_bind_addr = "127.0.0.1:${local.metrics_port}"
+  # CloudWatch export cascades off with the endpoint: without it the
+  # sidecar has nothing to scrape, so one flag turns everything off.
+  cloudwatch_metrics_enabled = var.cloudwatch_metrics_enabled && var.guardian_metrics_enabled
+  metrics_namespace          = var.metrics_namespace != "" ? var.metrics_namespace : "${title(var.stack_name)}/Server"
+  adot_container_name        = "adot-collector"
+  emf_log_group_name         = "${local.server_log_group_name}/emf"
+  dashboard_name             = "${var.stack_name}-server"
+
+  # Alarm notifications (alerting.tf). The managed topic only makes sense
+  # with alarms to route into it, so it cascades off with the metrics
+  # pipeline just like the alarms do; the Slack channel cascades with it.
+  alarm_notifications_enabled    = local.cloudwatch_metrics_enabled && var.alarm_notifications_enabled
+  alarm_slack_ids_complete       = var.alarm_slack_workspace_id != "" && var.alarm_slack_channel_id != ""
+  alarm_slack_enabled            = local.alarm_notifications_enabled && local.alarm_slack_ids_complete
+  alarm_sns_topic_name           = "${var.stack_name}-alarms"
+  alarm_sns_topic_arn            = local.alarm_notifications_enabled ? aws_sns_topic.alarms[0].arn : ""
+  alarm_slack_configuration_name = "${var.stack_name}-alarms-slack"
+  chatbot_role_name              = "${var.stack_name}-chatbot-alarms"
+  # Effective alarm/ok action list consumed by every alarm: operator ARNs
+  # first, managed topic appended.
+  effective_alarm_actions = concat(var.alarm_actions, local.alarm_notifications_enabled ? [aws_sns_topic.alarms[0].arn] : [])
+  # Log-level monitoring (log_alarms.tf): metric-filter counts of the
+  # server's ERROR / WARN lines. Own sub-namespace so metrics_namespace
+  # keeps meaning "what the ADOT pipeline exported" (its presence is the
+  # documented pipeline health check).
+  effective_guardian_log_format = lower(trimspace(var.guardian_log_format))
+  log_metrics_namespace         = "${local.metrics_namespace}/Logs"
+  log_error_metric_name         = "log_error_events"
+  log_warn_metric_name          = "log_warn_events"
+
   # Custom domain configuration
   domain_enabled      = var.domain_name != ""
   service_fqdn        = var.domain_name == "" ? "" : (var.subdomain != "" ? "${var.subdomain}.${var.domain_name}" : var.domain_name)
   acm_certificate_arn = local.domain_enabled ? var.acm_certificate_arn : ""
+
+  # Temporary legacy subdomain used during a hostname migration.
+  alias_domain_requested    = var.alias_subdomain != ""
+  alias_service_fqdn        = local.alias_domain_requested && var.domain_name != "" ? "${var.alias_subdomain}.${var.domain_name}" : ""
+  alias_domain_enabled      = local.alias_service_fqdn != "" && local.alias_service_fqdn != local.service_fqdn
+  alias_acm_certificate_arn = local.alias_domain_enabled ? (var.alias_acm_certificate_arn != "" ? var.alias_acm_certificate_arn : local.acm_certificate_arn) : ""
 }

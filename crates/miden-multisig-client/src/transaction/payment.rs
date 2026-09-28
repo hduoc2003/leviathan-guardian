@@ -2,58 +2,90 @@
 //!
 //! Functions for building P2ID (pay-to-id) and other payment transactions.
 
-use miden_client::account::{Account, AccountInterfaceExt};
+use miden_client::account::Account;
 use miden_client::transaction::{TransactionRequest, TransactionRequestBuilder};
-use miden_protocol::account::AccountId;
+use miden_protocol::account::{AccountCodeInterface, AccountId};
 use miden_protocol::asset::Asset;
+use miden_protocol::block::BlockNumber;
 use miden_protocol::crypto::rand::RandomCoin;
 use miden_protocol::note::NoteType;
 use miden_protocol::{Felt, Word};
-use miden_standards::account::interface::AccountInterface;
-use miden_standards::note::P2idNote;
+use miden_standards::account::auth::MultisigAuthArgs;
+use miden_standards::note::{P2idNote, P2ideNote};
+use miden_standards::tx_script::SendNotesTransactionScript;
 
+use super::TransactionRequestBuilderExt;
 use crate::error::{MultisigError, Result};
+use crate::proposal::P2ideHeights;
 
 /// Builds a P2ID transaction request.
 ///
 /// Creates a pay-to-id note of the given `note_type` and builds a transaction
-/// request to send it.
+/// request to send it. When `heights` carries a reclaim and/or timelock
+/// constraint, a P2IDE note is created instead of a plain P2ID note (issue
+/// #366); the note's serial number is drawn from an rng seeded with the auth
+/// args' salt either way, so cosigners rebuild the identical note.
 pub fn build_p2id_transaction_request<I>(
     sender_account: &Account,
     recipient: AccountId,
     assets: Vec<Asset>,
     note_type: NoteType,
-    salt: Word,
+    heights: P2ideHeights,
+    auth_args: &MultisigAuthArgs,
     signature_advice: I,
 ) -> Result<TransactionRequest>
 where
     I: IntoIterator<Item = (Word, Vec<Felt>)>,
 {
-    let mut rng = RandomCoin::new(salt);
+    let mut rng = RandomCoin::new(auth_args.salt());
 
-    let note = P2idNote::create(
+    let note: miden_protocol::note::Note = if heights.is_p2ide() {
+        P2ideNote::builder()
+            .sender(sender_account.id())
+            .target(recipient)
+            .maybe_reclaim_height(heights.reclaim.map(|h| BlockNumber::from(h.get())))
+            .maybe_timelock_height(heights.timelock.map(|h| BlockNumber::from(h.get())))
+            .assets(assets)
+            .note_type(note_type)
+            .generate_serial_number(&mut rng)
+            .build()
+            .map_err(|e| {
+                MultisigError::TransactionExecution(format!("failed to create P2IDE note: {}", e))
+            })?
+            .into()
+    } else {
+        P2idNote::builder()
+            .sender(sender_account.id())
+            .target(recipient)
+            .assets(assets)
+            .note_type(note_type)
+            .generate_serial_number(&mut rng)
+            .build()
+            .map_err(|e| {
+                MultisigError::TransactionExecution(format!("failed to create P2ID note: {}", e))
+            })?
+            .into()
+    };
+
+    let interface = AccountCodeInterface::new(
         sender_account.id(),
-        recipient,
-        assets,
-        note_type,
-        Default::default(),
-        &mut rng,
+        sender_account.code().procedures().iter().copied().collect(),
     )
     .map_err(|e| {
-        MultisigError::TransactionExecution(format!("failed to create P2ID note: {}", e))
+        MultisigError::TransactionExecution(format!("failed to build account interface: {}", e))
     })?;
 
-    let send_script = AccountInterface::from_account(sender_account)
-        .build_send_notes_script(&[note.clone().into()], None)
+    let send_notes_script = SendNotesTransactionScript::new(&interface, &[note.clone().into()])
         .map_err(|e| {
             MultisigError::TransactionExecution(format!("failed to build P2ID send script: {}", e))
         })?;
 
     let request = TransactionRequestBuilder::new()
-        .custom_script(send_script)
+        .custom_script(send_notes_script.tx_script().clone())
+        .script_arg(send_notes_script.tx_script_args())
         .expected_output_recipients(vec![note.recipient().clone()])
         .extend_advice_map(signature_advice)
-        .auth_arg(salt)
+        .multisig_auth_args(auth_args)
         .build()?;
 
     Ok(request)
@@ -67,11 +99,16 @@ mod tests {
         MultisigGuardianBuilder, MultisigGuardianConfig,
     };
     use miden_protocol::account::auth::AuthScheme;
-    use miden_protocol::account::{AccountId, AccountStorageMode};
-    use miden_protocol::asset::TokenSymbol;
+    use miden_protocol::account::{AccountId, AccountType};
+    use miden_protocol::asset::{AssetAmount, TokenSymbol};
     use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
-    use miden_standards::AuthMethod;
-    use miden_standards::account::faucets::create_basic_fungible_faucet;
+    use miden_standards::account::auth::{Approver, AuthSingleSig};
+    use miden_standards::account::faucets::{
+        FungibleFaucet, TokenName, create_singlesig_user_fungible_faucet,
+    };
+    use miden_standards::account::policies::{
+        BurnPolicy, MintPolicy, TokenPolicyManager, TransferPolicy,
+    };
 
     #[test]
     fn build_p2id_transaction_request_uses_custom_send_script() {
@@ -84,21 +121,32 @@ mod tests {
         ))
         .build()
         .unwrap();
-        let faucet = create_basic_fungible_faucet(
+        let faucet_definition = FungibleFaucet::builder()
+            .name(TokenName::new("test token").unwrap())
+            .symbol(TokenSymbol::try_from("TST").unwrap())
+            .decimals(8)
+            .max_supply(AssetAmount::from(1_000_000u32))
+            .build()
+            .unwrap();
+        let auth_component = AuthSingleSig::new(Approver::new(
+            secret_key.public_key().to_commitment().into(),
+            AuthScheme::Falcon512Poseidon2,
+        ));
+        let policy_manager = TokenPolicyManager::builder()
+            .active_mint_policy(MintPolicy::allow_all())
+            .active_burn_policy(BurnPolicy::allow_all())
+            .active_send_policy(TransferPolicy::allow_all())
+            .active_receive_policy(TransferPolicy::allow_all())
+            .build();
+        let faucet = create_singlesig_user_fungible_faucet(
             [5u8; 32],
-            TokenSymbol::try_from("TST").unwrap(),
-            8,
-            Felt::new(1_000_000),
-            AccountStorageMode::Public,
-            AuthMethod::SingleSig {
-                approver: (
-                    secret_key.public_key().to_commitment().into(),
-                    AuthScheme::Falcon512Poseidon2,
-                ),
-            },
+            faucet_definition,
+            auth_component,
+            policy_manager,
+            AccountType::Public,
         )
         .unwrap();
-        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
+        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
         let asset = miden_protocol::asset::FungibleAsset::new(faucet.id(), 100)
             .unwrap()
             .into();
@@ -108,7 +156,8 @@ mod tests {
             recipient,
             vec![asset],
             NoteType::Public,
-            Word::from([1u32, 2, 3, 4]),
+            P2ideHeights::default(),
+            &MultisigAuthArgs::new(BlockNumber::from(0), Word::from([1u32, 2, 3, 4])),
             std::iter::empty::<(Word, Vec<Felt>)>(),
         )
         .unwrap();
@@ -131,21 +180,32 @@ mod tests {
         ))
         .build()
         .unwrap();
-        let faucet = create_basic_fungible_faucet(
+        let faucet_definition = FungibleFaucet::builder()
+            .name(TokenName::new("test token").unwrap())
+            .symbol(TokenSymbol::try_from("TST").unwrap())
+            .decimals(8)
+            .max_supply(AssetAmount::from(1_000_000u32))
+            .build()
+            .unwrap();
+        let auth_component = AuthSingleSig::new(Approver::new(
+            secret_key.public_key().to_commitment().into(),
+            AuthScheme::Falcon512Poseidon2,
+        ));
+        let policy_manager = TokenPolicyManager::builder()
+            .active_mint_policy(MintPolicy::allow_all())
+            .active_burn_policy(BurnPolicy::allow_all())
+            .active_send_policy(TransferPolicy::allow_all())
+            .active_receive_policy(TransferPolicy::allow_all())
+            .build();
+        let faucet = create_singlesig_user_fungible_faucet(
             [5u8; 32],
-            TokenSymbol::try_from("TST").unwrap(),
-            8,
-            Felt::new(1_000_000),
-            AccountStorageMode::Public,
-            AuthMethod::SingleSig {
-                approver: (
-                    secret_key.public_key().to_commitment().into(),
-                    AuthScheme::Falcon512Poseidon2,
-                ),
-            },
+            faucet_definition,
+            auth_component,
+            policy_manager,
+            AccountType::Public,
         )
         .unwrap();
-        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b").unwrap();
+        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
         let salt = Word::from([1u32, 2, 3, 4]);
         let build = |note_type: NoteType| {
             let asset: Asset = miden_protocol::asset::FungibleAsset::new(faucet.id(), 100)
@@ -156,7 +216,8 @@ mod tests {
                 recipient,
                 vec![asset],
                 note_type,
-                salt,
+                P2ideHeights::default(),
+                &MultisigAuthArgs::new(BlockNumber::from(0), salt),
                 std::iter::empty::<(Word, Vec<Felt>)>(),
             )
             .unwrap()
@@ -169,5 +230,87 @@ mod tests {
         // parameterized public and private requests must not be identical.
         use miden_protocol::utils::serde::Serializable;
         assert_ne!(private_request.to_bytes(), public_request.to_bytes());
+    }
+
+    /// Presence of a reclaim/timelock height must switch the output note to
+    /// P2IDE (issue #366): the note script and storage change, so the built
+    /// request differs from a plain P2ID request; and the build must stay
+    /// deterministic in the salt so cosigners rebuild the identical note.
+    #[test]
+    fn build_p2id_transaction_request_heights_select_p2ide() {
+        let secret_key = SecretKey::new();
+        let signer_commitment = secret_key.public_key().to_commitment();
+        let account = MultisigGuardianBuilder::new(MultisigGuardianConfig::new(
+            1,
+            vec![signer_commitment],
+            Word::from([9u32, 8, 7, 6]),
+        ))
+        .build()
+        .unwrap();
+        let faucet_definition = FungibleFaucet::builder()
+            .name(TokenName::new("test token").unwrap())
+            .symbol(TokenSymbol::try_from("TST").unwrap())
+            .decimals(8)
+            .max_supply(AssetAmount::from(1_000_000u32))
+            .build()
+            .unwrap();
+        let auth_component = AuthSingleSig::new(Approver::new(
+            secret_key.public_key().to_commitment().into(),
+            AuthScheme::Falcon512Poseidon2,
+        ));
+        let policy_manager = TokenPolicyManager::builder()
+            .active_mint_policy(MintPolicy::allow_all())
+            .active_burn_policy(BurnPolicy::allow_all())
+            .active_send_policy(TransferPolicy::allow_all())
+            .active_receive_policy(TransferPolicy::allow_all())
+            .build();
+        let faucet = create_singlesig_user_fungible_faucet(
+            [5u8; 32],
+            faucet_definition,
+            auth_component,
+            policy_manager,
+            AccountType::Public,
+        )
+        .unwrap();
+        let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").unwrap();
+        let salt = Word::from([1u32, 2, 3, 4]);
+        let build = |reclaim: Option<u32>, timelock: Option<u32>| {
+            let asset: Asset = miden_protocol::asset::FungibleAsset::new(faucet.id(), 100)
+                .unwrap()
+                .into();
+            let heights = P2ideHeights {
+                reclaim: reclaim.and_then(std::num::NonZeroU32::new),
+                timelock: timelock.and_then(std::num::NonZeroU32::new),
+            };
+            build_p2id_transaction_request(
+                &account,
+                recipient,
+                vec![asset],
+                NoteType::Public,
+                heights,
+                &MultisigAuthArgs::new(BlockNumber::from(0), salt),
+                std::iter::empty::<(Word, Vec<Felt>)>(),
+            )
+            .unwrap()
+        };
+
+        let recipient_digests = |request: &TransactionRequest| -> Vec<Word> {
+            request
+                .expected_output_recipients()
+                .map(|r| r.digest())
+                .collect()
+        };
+
+        let plain = recipient_digests(&build(None, None));
+        let with_reclaim = recipient_digests(&build(Some(12345), None));
+        let with_timelock = recipient_digests(&build(None, Some(700)));
+
+        assert_ne!(plain, with_reclaim);
+        assert_ne!(plain, with_timelock);
+        assert_ne!(with_reclaim, with_timelock);
+
+        // Deterministic in (salt, heights): a cosigner rebuilding from the
+        // same metadata produces the identical output note.
+        assert_eq!(recipient_digests(&build(Some(12345), None)), with_reclaim);
     }
 }

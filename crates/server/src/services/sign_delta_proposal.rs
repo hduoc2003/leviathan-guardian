@@ -6,7 +6,6 @@ use crate::services::account_status::ensure_account_active_metadata;
 use crate::services::resolve_account;
 use crate::utils::normalize_commitment_hex;
 use guardian_shared::DeltaSignature;
-use tracing::info;
 
 #[derive(Debug, Clone)]
 pub struct SignDeltaProposalParams {
@@ -21,6 +20,16 @@ pub struct SignDeltaProposalResult {
     pub delta: DeltaObject,
 }
 
+#[tracing::instrument(
+    level = "info",
+    skip(state, params),
+    fields(
+        account_id = %params.account_id,
+        commitment = %params.commitment,
+        signer_commitment = tracing::field::Empty,
+        total_signatures = tracing::field::Empty
+    )
+)]
 pub async fn sign_delta_proposal(
     state: &AppState,
     params: SignDeltaProposalParams,
@@ -93,6 +102,10 @@ pub async fn sign_delta_proposal(
                 ))
             })?,
     };
+    tracing::Span::current().record(
+        "signer_commitment",
+        tracing::field::display(&signer_commitment_hex),
+    );
 
     // Check if already signed by this signer
     if cosigner_sigs
@@ -112,6 +125,7 @@ pub async fn sign_delta_proposal(
         signer_id: signer_commitment_hex.clone(),
     };
     cosigner_sigs.push(new_signature);
+    tracing::Span::current().record("total_signatures", cosigner_sigs.len());
 
     let new_sig = DeltaSignature {
         signer_id: signer_commitment_hex.clone(),
@@ -140,13 +154,6 @@ pub async fn sign_delta_proposal(
             );
     }
 
-    info!(
-        account_id = %account_id,
-        signer_commitment = %signer_commitment_hex,
-        total_signatures = cosigner_sigs.len(),
-        "sign_delta_proposal appended signature"
-    );
-
     // Update the delta proposal with the new signature
     delta_proposal.status = DeltaStatus::Pending {
         timestamp,
@@ -166,6 +173,7 @@ pub async fn sign_delta_proposal(
             crate::metrics::labels::ProposalEvent::Signed.as_str()
     )
     .increment(1);
+    tracing::info!("Delta proposal signed");
 
     Ok(SignDeltaProposalResult {
         delta: delta_proposal.clone(),
@@ -251,7 +259,7 @@ mod tests {
     async fn test_sign_delta_proposal_success() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment =
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
 
@@ -329,7 +337,7 @@ mod tests {
 
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment =
             "0xabababababababababababababababababababababababababababababababab".to_string();
 
@@ -416,7 +424,7 @@ mod tests {
     async fn test_sign_delta_proposal_second_signature() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment =
             "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
 
@@ -490,7 +498,7 @@ mod tests {
     async fn test_sign_delta_proposal_not_found() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment =
             "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string();
 
@@ -535,7 +543,7 @@ mod tests {
     async fn test_sign_delta_proposal_duplicate_signature() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment =
             "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_string();
 
@@ -590,7 +598,7 @@ mod tests {
     async fn test_sign_delta_proposal_unauthorized_signer() {
         let (state, _storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment =
             "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
 
@@ -637,7 +645,7 @@ mod tests {
     async fn test_sign_delta_proposal_storage_error() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment =
             "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string();
 
@@ -683,7 +691,7 @@ mod tests {
     async fn test_sign_delta_proposal_invalid_commitment_rejected() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let (signer_pubkey, signer_commitment, signer_signature, signer_timestamp) =
             crate::testing::helpers::generate_falcon_signature(&account_id);
 
@@ -715,7 +723,7 @@ mod tests {
     async fn test_sign_delta_proposal_rejects_mismatched_account() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment =
             "0x1111111111111111111111111111111111111111111111111111111111111111".to_string();
 
@@ -765,7 +773,7 @@ mod tests {
     async fn paused_account_rejected_before_proposal_lookup() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let (signer_pubkey, signer_commitment, signer_signature, signer_timestamp) =
             crate::testing::helpers::generate_falcon_signature(&account_id);
 
@@ -815,7 +823,7 @@ mod tests {
     async fn paused_account_returns_auth_error_for_unauthenticated_caller() {
         let (state, _storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let mut paused = create_account_metadata(
             account_id.clone(),
             Auth::MidenFalconRpo {

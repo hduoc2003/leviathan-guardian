@@ -1,19 +1,77 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { isProposalActionable, type Proposal } from './types/proposal.js';
 import { Multisig } from './multisig.js';
-import { GuardianHttpClient, GuardianHttpError, type Signer } from '@openzeppelin/guardian-client';
+import { GuardianHttpClient, type Signer } from '@openzeppelin/guardian-client';
 import {
   buildUpdateProcedureThresholdTransactionRequest,
   buildUpdateGuardianTransactionRequest,
   buildUpdateSignersTransactionRequest,
+  chainAnchorFromBase64,
   executeForSummary,
+  executeForSummaryAt,
+  summaryApprovalExpirationBlockNum,
+  summarySalt,
 } from './transaction.js';
 
-const { mockRpcGetAccountDetails, mockAccountDeserialize, mockDetectConfig, mockNoteFileDeserialize } = vi.hoisted(() => ({
+const {
+  mockRpcGetAccountDetails,
+  mockAccountDeserialize,
+  mockDetectConfig,
+  mockNoteFileDeserialize,
+  mockGetSignerCommitments,
+  mockGetGuardianCommitment,
+  mockImportNotesFromProposals,
+  mockBackfillPublicNotesByTag,
+  mockNoteDeserialize,
+} = vi.hoisted(() => ({
   mockRpcGetAccountDetails: vi.fn(),
   mockAccountDeserialize: vi.fn(),
   mockDetectConfig: vi.fn(),
   mockNoteFileDeserialize: vi.fn(),
+  mockGetSignerCommitments: vi.fn(),
+  mockGetGuardianCommitment: vi.fn(),
+  mockImportNotesFromProposals: vi.fn(),
+  mockBackfillPublicNotesByTag: vi.fn(),
+  mockNoteDeserialize: vi.fn(),
 }));
+
+vi.mock('./recovery/proposalNoteImport.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./recovery/proposalNoteImport.js')>();
+  return {
+    ...actual,
+    importNotesFromProposals: mockImportNotesFromProposals,
+  };
+});
+
+const { mockEnsureNotesAuthenticated } = vi.hoisted(() => ({
+  mockEnsureNotesAuthenticated: vi.fn(async () => undefined),
+}));
+vi.mock('./transaction/noteAuthentication.js', () => ({
+  ensureNotesAuthenticated: mockEnsureNotesAuthenticated,
+}));
+
+vi.mock('./recovery/publicNoteBackfill.js', () => ({
+  backfillPublicNotesByTag: mockBackfillPublicNotesByTag,
+}));
+
+const { MOCK_CHAIN_ANCHOR_B64, MOCK_SALT_HEX, MOCK_ANCHOR_BLOCK_NUM, createMockChainAnchor } = vi.hoisted(() => {
+  const MOCK_CHAIN_ANCHOR_B64 = 'bW9jay1jaGFpbi1hbmNob3I=';
+  // A rebuildable proposal carries its salt as well as its anchor: the request declares
+  // the salt and miden-client commits it into the auth arg, so the summary holds a
+  // commitment that cannot be inverted back to it. Same value the `summarySalt` mock
+  // returns, so pinning it here changes no expectation downstream.
+  const MOCK_SALT_HEX = '0x' + 'd'.repeat(64);
+  const MOCK_ANCHOR_BLOCK_NUM = 4242;
+  const createMockChainAnchor = () =>
+    ({
+      commitment: () => ({ toHex: () => '0x' + 'b'.repeat(64) }),
+      blockNum: () => MOCK_ANCHOR_BLOCK_NUM,
+      free: () => {},
+      serialize: () => new Uint8Array([9, 9, 9]),
+    }) as never;
+  return { MOCK_CHAIN_ANCHOR_B64, MOCK_SALT_HEX, MOCK_ANCHOR_BLOCK_NUM, createMockChainAnchor };
+});
 
 // Mock the Miden SDK
 vi.mock('@miden-sdk/miden-sdk', () => ({
@@ -35,16 +93,23 @@ vi.mock('@miden-sdk/miden-sdk', () => ({
   NoteFile: {
     deserialize: mockNoteFileDeserialize,
   },
+  Note: {
+    deserialize: mockNoteDeserialize,
+  },
   TransactionSummary: {
-    deserialize: vi.fn().mockReturnValue({
+    // Input-sensitive: 4-byte summary data commits to 0xdd…, so a test can
+    // model a second, non-aliasing proposal alongside the shared 0xcc…
+    // commitment every 3-byte ('AQID') summary produces.
+    deserialize: vi.fn((bytes: Uint8Array) => ({
       toCommitment: () => ({
-        toHex: () => '0x' + 'c'.repeat(64),
+        toHex: () => (bytes.length === 4 ? '0x' + 'd'.repeat(64) : '0x' + 'c'.repeat(64)),
       }),
-      salt: () => ({
-        toHex: () => '0x' + 'd'.repeat(64),
+      blockCommitment: () => ({
+        toHex: () => '0x' + 'b'.repeat(64),
       }),
+      userParams: () => [0, 0, 0, 1, 2, 3, 4],
       serialize: () => new Uint8Array([1, 2, 3]),
-    }),
+    })),
   },
   Word: {
     fromHex: vi.fn((hex: string) => ({
@@ -60,24 +125,48 @@ vi.mock('@miden-sdk/miden-sdk', () => ({
   TransactionRequest: {
     deserialize: vi.fn().mockReturnValue({}),
   },
-  AdviceMap: vi.fn().mockImplementation(() => ({
-    insert: vi.fn(),
-  })),
-  FeltArray: vi.fn().mockImplementation((arr: any[]) => arr),
+  AdviceMap: vi.fn().mockImplementation(function () {
+    return {
+      insert: vi.fn(),
+    };
+  }),
+  FeltArray: vi.fn().mockImplementation(function (arr: any[]) {
+    return arr;
+  }),
   Poseidon2: {
     hashElements: vi.fn().mockReturnValue({
       toHex: () => '0x' + 'e'.repeat(64),
     }),
   },
-  Endpoint: vi.fn().mockImplementation((url: string) => ({ url })),
-  RpcClient: vi.fn().mockImplementation(() => ({
-    getAccountDetails: mockRpcGetAccountDetails,
+  Endpoint: vi.fn().mockImplementation(function (url: string) {
+    return { url };
+  }),
+  RpcClient: vi.fn().mockImplementation(function () {
+    return {
+      getAccountDetails: mockRpcGetAccountDetails,
+    };
+  }),
+}));
+
+// The consume-notes v2 binding path rebuilds the request from embedded
+// notes; stub the builder so re-execution can run under the mocked SDK.
+vi.mock('./transaction/consumeNotes.js', () => ({
+  buildConsumeNotesTransactionRequestFromNotes: vi.fn(async () => ({
+    request: {},
+    salt: { toHex: () => '0x' + 'd'.repeat(64) },
   })),
 }));
 
 // Mock transaction module
 vi.mock('./transaction.js', () => ({
   executeForSummary: vi.fn(),
+  executeForSummaryAt: vi.fn(),
+  chainAnchorToBase64: vi.fn(() => MOCK_CHAIN_ANCHOR_B64),
+  chainAnchorFromBase64: vi.fn(() => createMockChainAnchor()),
+  summarySalt: vi.fn(() => ({
+    toHex: () => MOCK_SALT_HEX,
+  })),
+  summaryApprovalExpirationBlockNum: vi.fn(() => undefined),
   buildUpdateSignersTransactionRequest: vi.fn().mockResolvedValue({
     request: {},
     salt: { toHex: () => '0x' + 'd'.repeat(64) },
@@ -92,11 +181,11 @@ vi.mock('./transaction.js', () => ({
     request: {},
     salt: { toHex: () => '0x' + 'd'.repeat(64) },
   }),
-  buildConsumeNotesTransactionRequest: vi.fn().mockReturnValue({
+  buildConsumeNotesTransactionRequest: vi.fn().mockResolvedValue({
     request: {},
     salt: { toHex: () => '0x' + 'd'.repeat(64) },
   }),
-  buildP2idTransactionRequest: vi.fn().mockReturnValue({
+  buildP2idTransactionRequest: vi.fn().mockResolvedValue({
     request: {},
     salt: { toHex: () => '0x' + 'd'.repeat(64) },
   }),
@@ -122,6 +211,9 @@ vi.mock('./utils/signature.js', async () => {
       values: [1, 2, 3],
     })),
     signatureHexToBytes: vi.fn((hex: string) => new Uint8Array([0, 1, 2, 3])),
+    // These tests use synthetic signature bytes to exercise advice routing;
+    // recoverability is covered by tests/ecdsa-advice-encoding.test.ts.
+    assertEcdsaSignatureRecoverable: vi.fn(),
   };
 });
 
@@ -133,11 +225,19 @@ vi.mock('./utils/encoding.js', async () => {
   };
 });
 
-vi.mock('./inspector.js', () => ({
-  AccountInspector: {
-    fromAccount: mockDetectConfig,
-  },
-}));
+// Keep the real assertCompleteDetectedConfig so refreshConfigFromAccount's
+// fail-closed validation is exercised.
+vi.mock('./inspector.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./inspector.js')>();
+  return {
+    ...actual,
+    AccountInspector: {
+      fromAccount: mockDetectConfig,
+      getSignerPublicKeyCommitments: mockGetSignerCommitments,
+      getGuardianPublicKeyCommitment: mockGetGuardianCommitment,
+    },
+  };
+});
 
 // Mock fetch for GUARDIAN client
 const mockFetch = vi.fn();
@@ -186,6 +286,15 @@ describe('Multisig', () => {
   beforeEach(() => {
     mockFetch.mockReset();
     vi.mocked(executeForSummary).mockResolvedValue({
+      summary: {
+        toCommitment: () => ({
+          toHex: () => '0x' + 'c'.repeat(64),
+        }),
+        serialize: () => new Uint8Array([1, 2, 3]),
+      },
+      anchor: createMockChainAnchor(),
+    } as any);
+    vi.mocked(executeForSummaryAt).mockResolvedValue({
       toCommitment: () => ({
         toHex: () => '0x' + 'c'.repeat(64),
       }),
@@ -204,7 +313,6 @@ describe('Multisig', () => {
       threshold: 1,
       numSigners: 1,
       signerCommitments: ['0x' + 'a'.repeat(64)],
-      guardianEnabled: true,
       guardianCommitment: '0x' + 'c'.repeat(64),
       vaultBalances: [],
       procedureThresholds: new Map(),
@@ -222,6 +330,7 @@ describe('Multisig', () => {
     };
 
     guardian.setSigner(mockSigner);
+    vi.mocked(summarySalt).mockReturnValue({ toHex: () => MOCK_SALT_HEX } as never);
 
     mockAccount = {
       id: () => ({
@@ -233,6 +342,7 @@ describe('Multisig', () => {
     };
 
     mockWebClient = {
+      getSyncHeight: vi.fn().mockResolvedValue(0),
       executeTransaction: vi.fn(),
       proveTransaction: vi.fn(),
       submitProvenTransaction: vi.fn(),
@@ -350,6 +460,212 @@ describe('Multisig', () => {
     });
   });
 
+  describe('history (issue #413)', () => {
+    it('delegates to the guardian client with the account id and options', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      const page = {
+        entries: [
+          {
+            nonce: 3,
+            status: 'canonical' as const,
+            timestamp: '2026-08-01T12:00:03Z',
+            newCommitment: '0x' + 'b'.repeat(64),
+            inputNotes: [],
+            outputNotes: [],
+            decodeWarnings: [],
+          },
+        ],
+        nextCursor: 'cursor-token',
+      };
+      const spy = vi.spyOn(guardian, 'getDeltaHistory').mockResolvedValue(page);
+
+      const result = await multisig.deltaHistory({ limit: 5, cursor: 'prev' });
+
+      expect(result).toBe(page);
+      expect(spy).toHaveBeenCalledWith('0x' + 'a'.repeat(30), { limit: 5, cursor: 'prev' });
+    });
+  });
+
+  describe('recoverNotes wiring', () => {
+    const config = {
+      threshold: 1,
+      signerCommitments: ['0x' + 'a'.repeat(64)],
+      guardianCommitment: '0x' + 'c'.repeat(64),
+    };
+
+    it("wires the strategies with this client's endpoint, rpc settings, and a pre-backfill chain sync", async () => {
+      const multisig = createTestMultisig(config);
+      const outcomes = [{ identifier: '0x1', source: 'proposal', status: 'imported' }];
+      mockImportNotesFromProposals.mockResolvedValue(outcomes);
+      const report = {
+        scannedFrom: 5,
+        scannedTo: 9,
+        discovered: 0,
+        skippedPrivate: 0,
+        skippedIrrelevant: 0,
+        skippedUnscreenable: 0,
+        outcomes: [],
+        uncovered: [],
+        retryable: false,
+      };
+      mockBackfillPublicNotesByTag.mockResolvedValue(report);
+      const proposalsSpy = vi.spyOn(guardian, 'getDeltaProposals').mockResolvedValue([]);
+      mockWebClient.syncChain = vi.fn().mockResolvedValue(undefined);
+
+      const result = await multisig.recoverNotes({
+        transportDrain: false,
+        syncAfter: false,
+        fromBlock: 5,
+        toBlock: 9,
+      });
+
+      expect(proposalsSpy).toHaveBeenCalledWith('0x' + 'a'.repeat(30));
+      expect(mockImportNotesFromProposals).toHaveBeenCalledWith(mockWebClient, [], {
+        midenRpcEndpoint: MIDEN_RPC_ENDPOINT,
+        // Reuses the client's resolved retry budget (default: 2 attempts).
+        rpc: { retry: { maxAttempts: 2 } },
+      });
+      // A store that has never seen the chain cannot import proofs, so the
+      // backfill strategy syncs the chain state first.
+      expect(mockWebClient.syncChain).toHaveBeenCalled();
+      expect(mockBackfillPublicNotesByTag).toHaveBeenCalledWith(mockWebClient, {
+        accountId: '0x' + 'a'.repeat(30),
+        midenRpcEndpoint: MIDEN_RPC_ENDPOINT,
+        rpc: { retry: { maxAttempts: 2 } },
+        fromBlock: 5,
+        toBlock: 9,
+      });
+      expect(result.proposalImport).toEqual(outcomes);
+      expect(result.backfill).toBe(report);
+      expect(result.problems).toEqual([]);
+    });
+
+    it('omits unset block bounds so the backfill genesis/tip defaults apply', async () => {
+      const multisig = createTestMultisig(config);
+      mockBackfillPublicNotesByTag.mockResolvedValue({ outcomes: [] } as never);
+      mockWebClient.syncChain = vi.fn().mockResolvedValue(undefined);
+
+      await multisig.recoverNotes({
+        transportDrain: false,
+        proposalImport: false,
+        syncAfter: false,
+      });
+
+      const options = mockBackfillPublicNotesByTag.mock.calls.at(-1)?.[1] as object;
+      expect('fromBlock' in options).toBe(false);
+      expect('toBlock' in options).toBe(false);
+    });
+
+    it('merges a listing delta with the cached proposal it aliases: listing nonce wins, cached metadata is inherited', async () => {
+      // The listing computes each delta's id from its summary; when that id
+      // matches a cached proposal, the factory reuses the cached metadata
+      // while the listing's nonce wins — and the merged proposal must still
+      // clear the stale-nonce filter on the listing nonce, not the cached
+      // one. This is the branch the pre-switch import crosses when the
+      // GUARDIAN re-serves a proposal this client already knows.
+      const cachedId = '0x' + 'c'.repeat(64);
+      const accountWithNonce = {
+        ...mockAccount,
+        nonce: () => ({ asInt: () => BigInt(1) }),
+      };
+      const multisig = new Multisig(
+        accountWithNonce,
+        config,
+        guardian,
+        mockSigner,
+        mockWebClient,
+        undefined,
+        MIDEN_RPC_ENDPOINT,
+      );
+      (multisig as any).proposals.set(cachedId, {
+        id: cachedId,
+        accountId: multisig.accountId,
+        nonce: 1,
+        status: 'ready',
+        txSummary: 'AQID',
+        signatures: [],
+        metadata: {
+          proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
+          newGuardianPubkey: '0x' + '1'.repeat(64),
+          newGuardianEndpoint: 'http://new-guardian.com',
+          description: '',
+        },
+      });
+      // 'AQID' (3 bytes) computes the cached id; the listing serves it at
+      // nonce 2 (above the account's nonce 1) with no metadata of its own.
+      vi.spyOn(guardian, 'getDeltaProposals').mockResolvedValue([
+        {
+          accountId: multisig.accountId,
+          nonce: 2,
+          prevCommitment: '0x' + 'b'.repeat(64),
+          deltaPayload: { txSummary: { data: 'AQID' }, signatures: [], metadata: {} },
+          status: {
+            status: 'pending',
+            timestamp: '2024-01-01T00:00:00Z',
+            proposerId: '0x' + 'a'.repeat(64),
+            cosignerSigs: [],
+          },
+        },
+      ] as never);
+      mockImportNotesFromProposals.mockReset();
+      mockImportNotesFromProposals.mockResolvedValue([]);
+
+      const result = await multisig.recoverNotes({
+        transportDrain: false,
+        publicBackfill: false,
+        syncAfter: false,
+      });
+
+      expect(result.problems).toEqual([]);
+      expect(mockImportNotesFromProposals).toHaveBeenCalledWith(
+        mockWebClient,
+        [
+          expect.objectContaining({
+            id: cachedId,
+            nonce: 2,
+            metadata: expect.objectContaining({ proposalType: 'switch_guardian' }),
+          }),
+        ],
+        expect.objectContaining({ midenRpcEndpoint: MIDEN_RPC_ENDPOINT }),
+      );
+    });
+
+    it('isolates a corrupt proposal as an invalid outcome instead of failing the step', async () => {
+      const multisig = createTestMultisig(config);
+      mockImportNotesFromProposals.mockResolvedValue([]);
+      vi.spyOn(guardian, 'getDeltaProposals').mockResolvedValue([
+        // A payload that cannot even produce a proposal id: the listing must
+        // skip it with a reason instead of throwing away the whole step.
+        { nonce: 3, deltaPayload: { txSummary: { data: '!!! garbage !!!' } } },
+      ] as never);
+
+      const result = await multisig.recoverNotes({
+        transportDrain: false,
+        publicBackfill: false,
+        syncAfter: false,
+      });
+
+      expect(result.problems).toEqual([]);
+      expect(result.proposalImport).toHaveLength(1);
+      expect(result.proposalImport?.[0]?.status).toBe('invalid');
+      expect(result.proposalImport?.[0]?.identifier).toContain('nonce 3');
+      // The healthy remainder (here: none) still reaches the import.
+      expect(mockImportNotesFromProposals).toHaveBeenCalledWith(
+        mockWebClient,
+        [],
+        expect.objectContaining({ midenRpcEndpoint: MIDEN_RPC_ENDPOINT }),
+      );
+    });
+  });
+
   describe('signerCommitment', () => {
     it('should return signer commitment', () => {
       const config = {
@@ -360,6 +676,56 @@ describe('Multisig', () => {
 
       const multisig = createTestMultisig(config);
       expect(multisig.signerCommitment).toBe(mockSigner.commitment);
+    });
+  });
+
+  describe('getSignerPublicKeyCommitments (issue #306)', () => {
+    const config = {
+      threshold: 1,
+      signerCommitments: ['0x' + 'a'.repeat(64)],
+      guardianCommitment: '0x' + 'c'.repeat(64),
+    };
+
+    it('reads commitments from the store-backed account', async () => {
+      const storeAccount = mockedAccount('0x' + 'b'.repeat(64), 1);
+      mockWebClient.getAccount.mockResolvedValueOnce(storeAccount);
+      const expected = ['0x' + '1'.repeat(64), '0x' + '2'.repeat(64)];
+      mockGetSignerCommitments.mockReturnValueOnce(expected);
+
+      const multisig = createTestMultisig(config);
+      const commitments = await multisig.getSignerPublicKeyCommitments();
+
+      expect(commitments).toEqual(expected);
+      expect(mockGetSignerCommitments).toHaveBeenCalledWith(storeAccount);
+    });
+
+    it('falls back to the account snapshot when the store has no record', async () => {
+      mockWebClient.getAccount.mockResolvedValueOnce(null);
+      mockGetSignerCommitments.mockReturnValueOnce(['0x' + '3'.repeat(64)]);
+
+      const multisig = createTestMultisig(config);
+      await multisig.getSignerPublicKeyCommitments();
+
+      expect(mockGetSignerCommitments).toHaveBeenCalledWith(mockAccount);
+    });
+  });
+
+  describe('getGuardianPublicKeyCommitment (issue #306)', () => {
+    it('reads the guardian commitment from the store-backed account', async () => {
+      const storeAccount = mockedAccount('0x' + 'b'.repeat(64), 1);
+      mockWebClient.getAccount.mockResolvedValueOnce(storeAccount);
+      mockGetGuardianCommitment.mockReturnValueOnce('0x' + '4'.repeat(64));
+
+      const multisig = createTestMultisig({
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      });
+
+      const commitment = await multisig.getGuardianPublicKeyCommitment();
+
+      expect(commitment).toBe('0x' + '4'.repeat(64));
+      expect(mockGetGuardianCommitment).toHaveBeenCalledWith(storeAccount);
     });
   });
 
@@ -499,7 +865,6 @@ describe('Multisig', () => {
         threshold: 2,
         numSigners: 2,
         signerCommitments: ['0x' + '1'.repeat(64), '0x' + '2'.repeat(64)],
-        guardianEnabled: true,
         guardianCommitment: '0x' + 'd'.repeat(64),
         vaultBalances: [],
         procedureThresholds: new Map(),
@@ -514,6 +879,44 @@ describe('Multisig', () => {
       ]);
       expect(multisig.guardianCommitment).toBe('0x' + 'd'.repeat(64));
       expect(mockWebClient.newAccount).not.toHaveBeenCalled();
+    });
+
+    it('keeps the previous config when a refresh reads an incomplete signer set (issue #306 review)', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config, mockSigner, '0x' + 'a'.repeat(30));
+
+      mockWebClient.getAccount.mockResolvedValueOnce(mockedAccount('0x' + 'b'.repeat(64), 0));
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          account_id: multisig.accountId,
+          commitment: '0x' + 'b'.repeat(64),
+          state_json: { data: 'AQID' },
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-02T00:00:00Z',
+        }),
+      });
+      // Storage reports 3 signers but only 1 entry was readable: adopting
+      // this would let membership proposals rewrite the on-chain set without
+      // the omitted keys. The refresh must keep the previous config instead.
+      mockDetectConfig.mockReturnValueOnce({
+        threshold: 2,
+        numSigners: 3,
+        signerCommitments: ['0x' + '1'.repeat(64)],
+        guardianCommitment: '0x' + 'd'.repeat(64),
+        vaultBalances: [],
+        procedureThresholds: new Map(),
+      });
+
+      await multisig.syncState();
+
+      expect(multisig.threshold).toBe(1);
+      expect(multisig.signerCommitments).toEqual(['0x' + 'a'.repeat(64)]);
+      expect(multisig.guardianCommitment).toBe('0x' + 'c'.repeat(64));
     });
 
     it('should overwrite local state when account is not found on-chain', async () => {
@@ -904,6 +1307,757 @@ describe('Multisig', () => {
   });
 
   describe('syncProposals', () => {
+    function pendingDeltaProposal(txSummaryData: string, nonce = 1) {
+      return {
+        account_id: '0x' + 'a'.repeat(30),
+        nonce,
+        prev_commitment: '0x' + 'b'.repeat(64),
+        delta_payload: {
+          tx_summary: { data: txSummaryData },
+          signatures: [],
+          metadata: {
+            proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
+            target_threshold: 1,
+            signer_commitments: ['0x' + 'a'.repeat(64)],
+            description: '',
+          },
+        },
+        status: {
+          status: 'pending',
+          timestamp: '2024-01-01T00:00:00Z',
+          proposer_id: '0x' + 'c'.repeat(64),
+          cosigner_sigs: [
+            {
+              signer_id: '0x' + 'a'.repeat(64),
+              signature: { scheme: 'falcon', signature: '0x' + 'e'.repeat(128) },
+              timestamp: '2024-01-01T00:00:00Z',
+            },
+          ],
+        },
+      };
+    }
+
+    it('should prune proposals GUARDIAN no longer reports (executed/canonicalized)', async () => {
+      const config = {
+        threshold: 2,
+        signerCommitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const first = await multisig.syncProposals();
+      expect(first.length).toBe(1);
+
+      // Another signer executed the proposal, so GUARDIAN pruned it and now
+      // returns an empty list. The cache must reconcile to empty rather than
+      // keep returning the stale (still-pending-looking) proposal forever.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const second = await multisig.syncProposals();
+      expect(second).toEqual([]);
+      expect(multisig.listProposals()).toEqual([]);
+    });
+
+    it('should keep proposals GUARDIAN still reports across syncs', async () => {
+      const config = {
+        threshold: 2,
+        signerCommitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const first = await multisig.syncProposals();
+      expect(first.length).toBe(1);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const second = await multisig.syncProposals();
+      expect(second.length).toBe(1);
+      expect(multisig.listProposals().length).toBe(1);
+    });
+
+    it('should keep a locally-created proposal for one lagging listing, then prune it', async () => {
+      // createProposal pushes to GUARDIAN then caches. If GUARDIAN's
+      // read-your-writes lags and the immediately-following sync omits the
+      // just-pushed proposal, it must NOT be evicted on that first listing.
+      // A second consecutive omission means GUARDIAN genuinely does not have
+      // it as pending (the #404 creator path: another signer executed it
+      // before this client ever saw it listed), so it is pruned.
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          delta: {
+            account_id: '0x' + 'a'.repeat(30),
+            nonce: 1,
+            prev_commitment: '0x' + 'b'.repeat(64),
+            delta_payload: { tx_summary: { data: 'AQID' }, signatures: [] },
+            status: {
+              status: 'pending',
+              timestamp: '2024-01-01T00:00:00Z',
+              proposer_id: '0x' + 'c'.repeat(64),
+              cosigner_sigs: [],
+            },
+          },
+          commitment: '0x' + 'c'.repeat(64),
+        }),
+      });
+      const created = await multisig.createProposal(1, 'AQID', {
+        proposalType: 'add_signer',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
+        targetThreshold: 1,
+        targetSignerCommitments: ['0x' + 'a'.repeat(64)],
+        description: '',
+      });
+      expect(multisig.listProposals().length).toBe(1);
+
+      // GUARDIAN's next getDeltaProposals lags and returns [].
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const synced = await multisig.syncProposals();
+      expect(synced.length).toBe(1);
+      expect(synced[0].id).toBe(created.id);
+      expect(multisig.listProposals().length).toBe(1);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const second = await multisig.syncProposals();
+      expect(second).toEqual([]);
+      expect(multisig.listProposals()).toEqual([]);
+    });
+
+    it('should keep an imported proposal GUARDIAN never lists (offline flow)', async () => {
+      // importProposal is the offline side channel: GUARDIAN may never have
+      // received the proposal (e.g. an offline guardian switch), so listing
+      // omissions must not expire it.
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config, mockSigner, '0x' + 'a'.repeat(30));
+
+      const imported = await multisig.importProposal(
+        JSON.stringify({
+          accountId: '0x' + 'a'.repeat(30),
+          nonce: 1,
+          commitment: '0x' + 'c'.repeat(64),
+          txSummaryBase64: 'AQID',
+          signatures: [],
+          metadata: {
+            proposalType: 'add_signer',
+            chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+            saltHex: MOCK_SALT_HEX,
+            targetThreshold: 1,
+            targetSignerCommitments: ['0x' + 'a'.repeat(64)],
+            description: '',
+          },
+        })
+      );
+      expect(multisig.listProposals().map((p) => p.id)).toEqual([imported.id]);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const first = await multisig.syncProposals();
+      expect(first.map((p) => p.id)).toEqual([imported.id]);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const second = await multisig.syncProposals();
+      expect(second.map((p) => p.id)).toEqual([imported.id]);
+      expect(multisig.listProposals().map((p) => p.id)).toEqual([imported.id]);
+    });
+
+    it('should prune an imported proposal once GUARDIAN acknowledged it via online signing', async () => {
+      // A successful signDeltaProposal response returns GUARDIAN's own copy
+      // of the delta, so the imported proposal is provably guardian-held and
+      // listing omissions fall under the bounded grace instead of the
+      // offline exemption.
+      const config = {
+        threshold: 2,
+        signerCommitments: [mockSigner.commitment, '0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config, mockSigner, '0x' + 'a'.repeat(30));
+
+      const imported = await multisig.importProposal(
+        JSON.stringify({
+          accountId: '0x' + 'a'.repeat(30),
+          nonce: 1,
+          commitment: '0x' + 'c'.repeat(64),
+          txSummaryBase64: 'AQID',
+          signatures: [],
+          metadata: {
+            proposalType: 'add_signer',
+            chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+            saltHex: MOCK_SALT_HEX,
+            targetThreshold: 1,
+            targetSignerCommitments: ['0x' + 'a'.repeat(64)],
+            description: '',
+          },
+        })
+      );
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          account_id: '0x' + 'a'.repeat(30),
+          nonce: 1,
+          prev_commitment: '0x' + 'b'.repeat(64),
+          delta_payload: {
+            tx_summary: { data: 'AQID' },
+            signatures: [],
+            metadata: {
+              proposal_type: 'add_signer',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
+              target_threshold: 1,
+              signer_commitments: ['0x' + 'a'.repeat(64)],
+              description: '',
+            },
+          },
+          status: {
+            status: 'pending',
+            timestamp: '2024-01-01T00:00:00Z',
+            proposer_id: '0x' + 'c'.repeat(64),
+            cosigner_sigs: [
+              {
+                signer_id: mockSigner.commitment,
+                signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
+                timestamp: '2024-01-01T01:00:00Z',
+              },
+            ],
+          },
+        }),
+      });
+      await multisig.signProposal(imported.id);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const first = await multisig.syncProposals();
+      expect(first.map((p) => p.id)).toEqual([imported.id]);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      expect(await multisig.syncProposals()).toEqual([]);
+      expect(multisig.listProposals()).toEqual([]);
+    });
+
+    it('should not prune a proposal replaced by online signing while a stale listing was in flight', async () => {
+      // signProposal(P) succeeding mid-sync means GUARDIAN re-acknowledged P
+      // after the in-flight (empty) listing was served, so that listing must
+      // not delete the freshly signed cache entry.
+      const config = {
+        threshold: 2,
+        signerCommitments: [mockSigner.commitment, '0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config, mockSigner, '0x' + 'a'.repeat(30));
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const [seeded] = await multisig.syncProposals();
+      expect(seeded.signatures).toHaveLength(1);
+
+      let releaseListing!: (value: unknown) => void;
+      mockFetch.mockImplementationOnce(
+        () => new Promise((resolve) => { releaseListing = resolve; })
+      );
+      const sync = multisig.syncProposals();
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          account_id: '0x' + 'a'.repeat(30),
+          nonce: 1,
+          prev_commitment: '0x' + 'b'.repeat(64),
+          delta_payload: {
+            tx_summary: { data: 'AQID' },
+            signatures: [],
+            metadata: {
+              proposal_type: 'add_signer',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
+              target_threshold: 1,
+              signer_commitments: ['0x' + 'a'.repeat(64)],
+              description: '',
+            },
+          },
+          status: {
+            status: 'pending',
+            timestamp: '2024-01-01T00:00:00Z',
+            proposer_id: '0x' + 'c'.repeat(64),
+            cosigner_sigs: [
+              {
+                signer_id: '0x' + 'a'.repeat(64),
+                signature: { scheme: 'falcon', signature: '0x' + 'e'.repeat(128) },
+                timestamp: '2024-01-01T00:00:00Z',
+              },
+              {
+                signer_id: mockSigner.commitment,
+                signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
+                timestamp: '2024-01-01T01:00:00Z',
+              },
+            ],
+          },
+        }),
+      });
+      const signed = await multisig.signProposal('0x' + 'c'.repeat(64));
+      expect(signed.signatures).toHaveLength(2);
+
+      releaseListing({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const synced = await sync;
+      expect(synced.map((p) => p.id)).toEqual(['0x' + 'c'.repeat(64)]);
+      expect(
+        multisig.listProposals().find((p) => p.id === '0x' + 'c'.repeat(64))?.signatures
+      ).toHaveLength(2);
+    });
+
+    it('should preserve a signature added while the listing was being verified', async () => {
+      // signProposalOffline(A) completing while the sync stalls verifying B
+      // must not be clobbered when the sync applies its pre-signing snapshot
+      // of A.
+      const config = {
+        threshold: 2,
+        signerCommitments: [mockSigner.commitment, '0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config, mockSigner, '0x' + 'a'.repeat(30));
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const [seeded] = await multisig.syncProposals();
+      expect(seeded.signatures).toHaveLength(1);
+
+      let releaseVerify: (() => void) | undefined;
+      vi.mocked(executeForSummaryAt)
+        .mockResolvedValueOnce({
+          toCommitment: () => ({ toHex: () => '0x' + 'c'.repeat(64) }),
+        } as any)
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseVerify = () =>
+                resolve({
+                  toCommitment: () => ({ toHex: () => '0x' + 'd'.repeat(64) }),
+                } as any);
+            })
+        );
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          proposals: [pendingDeltaProposal('AQID'), pendingDeltaProposal('AQIDBA==', 2)],
+        }),
+      });
+      const sync = multisig.syncProposals();
+      await vi.waitFor(() => expect(releaseVerify).toBeTruthy());
+
+      await multisig.signProposalOffline('0x' + 'c'.repeat(64));
+
+      releaseVerify!();
+      const synced = await sync;
+      const signedA = synced.find((p) => p.id === '0x' + 'c'.repeat(64));
+      expect(signedA?.signatures).toHaveLength(2);
+      expect(
+        multisig.listProposals().find((p) => p.id === '0x' + 'c'.repeat(64))?.signatures
+      ).toHaveLength(2);
+    });
+
+    it('should keep a proposal executed while the listing was being verified finalized', async () => {
+      // executeProposal(P) completing while the sync stalls verifying Q must
+      // not be clobbered when the sync applies P's pre-execution pending
+      // delta: a UI keyed on status would show Execute again on a proposal
+      // that already landed on chain.
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+      const proposalId = '0x' + 'c'.repeat(64);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const [seeded] = await multisig.syncProposals();
+      expect(seeded.status).toBe('ready');
+
+      let releaseVerify: (() => void) | undefined;
+      vi.mocked(executeForSummaryAt)
+        .mockResolvedValueOnce({
+          toCommitment: () => ({ toHex: () => '0x' + 'c'.repeat(64) }),
+        } as any)
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseVerify = () =>
+                resolve({
+                  toCommitment: () => ({ toHex: () => '0x' + 'd'.repeat(64) }),
+                } as any);
+            })
+        );
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          proposals: [pendingDeltaProposal('AQID'), pendingDeltaProposal('AQIDBA==', 2)],
+        }),
+      });
+      const sync = multisig.syncProposals();
+      await vi.waitFor(() => expect(releaseVerify).toBeTruthy());
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => pendingDeltaProposal('AQID'),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          account_id: '0x' + 'a'.repeat(30),
+          nonce: 1,
+          ack_sig: '0x' + '6'.repeat(130),
+          ack_pubkey: '0x' + 'f'.repeat(64),
+          ack_scheme: 'falcon',
+        }),
+      });
+      await multisig.executeProposal(proposalId);
+      expect(multisig.listProposals().find((p) => p.id === proposalId)?.status).toBe('finalized');
+
+      releaseVerify!();
+      const synced = await sync;
+      expect(synced.map((p) => p.id).sort()).toEqual([proposalId, '0x' + 'd'.repeat(64)]);
+      expect(synced.find((p) => p.id === proposalId)?.status).toBe('finalized');
+      expect(multisig.listProposals().find((p) => p.id === proposalId)?.status).toBe('finalized');
+
+      // GUARDIAN drops the executed proposal on the next listing and the
+      // finalized entry prunes like any other reported id.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQIDBA==', 2)] }),
+      });
+      const after = await multisig.syncProposals();
+      expect(after.map((p) => p.id)).toEqual(['0x' + 'd'.repeat(64)]);
+    });
+
+    it('should not prune a reported proposal signed offline while a stale empty listing was in flight', async () => {
+      // signProposalOffline writes to the cache while the sync is awaiting
+      // GUARDIAN; the sync's pre-signing snapshot must not match the signed
+      // entry, or the empty listing deletes a proposal the user just signed.
+      const config = {
+        threshold: 2,
+        signerCommitments: [mockSigner.commitment, '0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config, mockSigner, '0x' + 'a'.repeat(30));
+      const proposalId = '0x' + 'c'.repeat(64);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const [seeded] = await multisig.syncProposals();
+      expect(seeded.signatures).toHaveLength(1);
+
+      let releaseListing!: (value: unknown) => void;
+      mockFetch.mockImplementationOnce(
+        () => new Promise((resolve) => { releaseListing = resolve; })
+      );
+      const sync = multisig.syncProposals();
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+
+      await multisig.signProposalOffline(proposalId);
+      expect(multisig.listProposals().find((p) => p.id === proposalId)?.signatures).toHaveLength(2);
+
+      releaseListing({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const synced = await sync;
+      expect(synced.map((p) => p.id)).toEqual([proposalId]);
+      expect(synced[0].signatures).toHaveLength(2);
+      expect(synced[0].status).toBe('ready');
+    });
+
+    it('should leave the cache and pruning state untouched when a listing fails to parse', async () => {
+      // A response of [valid, malformed] must not cache the valid proposal
+      // before throwing on the malformed one: a proposal cached that way was
+      // never recorded as reported, so no later sync could ever prune it and
+      // it would show as pending forever (the same shape as issue #404).
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          proposals: [
+            pendingDeltaProposal('AQID'),
+            { ...pendingDeltaProposal('AQIDBA==', 2), account_id: '0x' + 'f'.repeat(30) },
+          ],
+        }),
+      });
+      await expect(multisig.syncProposals()).rejects.toThrow(
+        'Proposal is for a different account'
+      );
+      expect(multisig.listProposals()).toEqual([]);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      await expect(multisig.syncProposals()).resolves.toEqual([]);
+    });
+
+    it('should cache a proposal that fails verification as reported and prune it once omitted (issue #462)', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      // The 4-byte summary commits to 0xdd… while the default re-execution
+      // mock reconstructs 0xcc…, so the second proposal fails the binding.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          proposals: [pendingDeltaProposal('AQID'), pendingDeltaProposal('AQIDBA==', 2)],
+        }),
+      });
+      const synced = await multisig.syncProposals();
+      expect(synced).toHaveLength(2);
+      expect(synced.find((p) => p.nonce === 1)?.verification).toEqual({ status: 'verified' });
+      expect(synced.find((p) => p.nonce === 2)?.verification).toMatchObject({
+        status: 'failed',
+        retryable: false,
+        message: expect.stringContaining('metadata does not match tx_summary'),
+      });
+
+      // Both were reported, so a listing that omits them prunes both at once.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      await expect(multisig.syncProposals()).resolves.toEqual([]);
+    });
+
+    it('should keep a seeded reported proposal cached and prunable across a failed listing', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const seeded = await multisig.syncProposals();
+      expect(seeded.length).toBe(1);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          proposals: [
+            pendingDeltaProposal('AQID'),
+            { ...pendingDeltaProposal('AQIDBA==', 2), account_id: '0x' + 'f'.repeat(30) },
+          ],
+        }),
+      });
+      await expect(multisig.syncProposals()).rejects.toThrow(
+        'Proposal is for a different account'
+      );
+      expect(multisig.listProposals().map((p) => p.id)).toEqual(['0x' + 'c'.repeat(64)]);
+
+      // The failed listing did not disturb the pruning state: the seeded
+      // proposal is still recorded as reported, so the next listing that
+      // omits it prunes it immediately.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      await expect(multisig.syncProposals()).resolves.toEqual([]);
+    });
+
+    it('should abandon an in-flight sync when the GUARDIAN client is replaced', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      let releaseListing!: (value: unknown) => void;
+      mockFetch.mockImplementationOnce(
+        () => new Promise((resolve) => { releaseListing = resolve; })
+      );
+      const sync = multisig.syncProposals();
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+
+      multisig.setGuardianClient(new GuardianHttpClient('http://other-guardian:3000'));
+
+      releaseListing({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      await expect(sync).rejects.toThrow('GUARDIAN client was replaced');
+      expect(multisig.listProposals()).toEqual([]);
+    });
+
+    it('should not prune from the old GUARDIAN reported set after a repoint', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const onOldGuardian = await multisig.syncProposals();
+      expect(onOldGuardian.length).toBe(1);
+
+      multisig.setGuardianClient(new GuardianHttpClient('http://other-guardian:3000'));
+
+      // The new GUARDIAN's reported set starts empty, so its first listing
+      // must not prune on the strength of what the old GUARDIAN reported;
+      // the survivor is now unreported and falls to the bounded grace.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const first = await multisig.syncProposals();
+      expect(first.length).toBe(1);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      expect(await multisig.syncProposals()).toEqual([]);
+    });
+
+    it('should share one in-flight sync between overlapping callers', async () => {
+      // Without dedupe, a stalled sync applied late prunes with a stale view:
+      // sync A fetches [P] and stalls, createProposal(Q) caches Q, sync B
+      // fetches [P, Q] and completes, then A applies and deletes Q. Sharing
+      // the in-flight sync removes the overlap entirely.
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      let releaseListing!: (value: unknown) => void;
+      mockFetch.mockImplementationOnce(
+        () => new Promise((resolve) => { releaseListing = resolve; })
+      );
+      const syncA = multisig.syncProposals();
+      const syncB = multisig.syncProposals();
+      expect(syncB).toBe(syncA);
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+
+      // While the listing is in flight, a proposal is created locally (the
+      // 4-byte summary commits to 0xdd…, distinct from the listing's 0xcc…).
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
+        toCommitment: () => ({ toHex: () => '0x' + 'd'.repeat(64) }),
+      } as any);
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          delta: {
+            account_id: '0x' + 'a'.repeat(30),
+            nonce: 2,
+            prev_commitment: '0x' + 'b'.repeat(64),
+            delta_payload: { tx_summary: { data: 'AQIDBA==' }, signatures: [] },
+            status: {
+              status: 'pending',
+              timestamp: '2024-01-01T00:00:00Z',
+              proposer_id: '0x' + 'c'.repeat(64),
+              cosigner_sigs: [],
+            },
+          },
+          commitment: '0x' + 'd'.repeat(64),
+        }),
+      });
+      const created = await multisig.createProposal(2, 'AQIDBA==', {
+        proposalType: 'add_signer',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
+        targetThreshold: 1,
+        targetSignerCommitments: ['0x' + 'a'.repeat(64)],
+        description: '',
+      });
+
+      releaseListing({
+        ok: true,
+        json: async () => ({ proposals: [pendingDeltaProposal('AQID')] }),
+      });
+      const [resultA, resultB] = await Promise.all([syncA, syncB]);
+      expect(resultB).toBe(resultA);
+      expect(resultA.map((p) => p.id).sort()).toEqual([
+        '0x' + 'c'.repeat(64),
+        '0x' + 'd'.repeat(64),
+      ]);
+      expect(multisig.listProposals().map((p) => p.id)).toContain(created.id);
+
+      // The next sync starts fresh: the reported proposal is pruned once
+      // GUARDIAN drops it, while the never-reported local one survives.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      });
+      const after = await multisig.syncProposals();
+      expect(after.map((p) => p.id)).toEqual([created.id]);
+    });
+
     it('should sync proposals from GUARDIAN', async () => {
       const config = {
         threshold: 2,
@@ -923,6 +2077,8 @@ describe('Multisig', () => {
             signatures: [],
           metadata: {
             proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             target_threshold: 1,
             signer_commitments: ['0x' + 'a'.repeat(64)],
             description: '',
@@ -974,6 +2130,8 @@ describe('Multisig', () => {
             signatures: [],
           metadata: {
             proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             target_threshold: 1,
             signer_commitments: ['0x' + 'a'.repeat(64)],
             description: '',
@@ -1026,6 +2184,8 @@ describe('Multisig', () => {
                 signatures: [],
                 metadata: {
                   proposal_type: 'add_signer',
+                  chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+                  salt: MOCK_SALT_HEX,
                   target_threshold: 1,
                   signer_commitments: ['0x' + 'a'.repeat(64)],
                   description: '',
@@ -1042,15 +2202,349 @@ describe('Multisig', () => {
         }),
       });
 
-      vi.mocked(executeForSummary).mockResolvedValueOnce({
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
         toCommitment: () => ({
           toHex: () => '0x' + 'f'.repeat(64),
         }),
       } as any);
 
-      await expect(multisig.syncProposals()).rejects.toThrow(
-        'Invalid proposal: metadata does not match tx_summary'
+      // Issue #462: the listing reports the failure instead of failing.
+      const [listed] = await multisig.syncProposals();
+      expect(listed.verification).toMatchObject({
+        status: 'failed',
+        retryable: false,
+        message: expect.stringContaining('Invalid proposal: metadata does not match tx_summary'),
+      });
+    });
+
+    /// A structurally valid anchor pinned to the wrong block must be rejected
+    /// before anything executes against it: its commitment disagrees with the
+    /// block commitment signed into the tx_summary.
+    it('should reject a proposal whose chain anchor does not match the summary block commitment', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+
+      const multisig = createTestMultisig(config);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          proposals: [
+            {
+              account_id: '0x' + 'a'.repeat(30),
+              nonce: 1,
+              prev_commitment: '0x' + 'b'.repeat(64),
+              delta_payload: {
+                tx_summary: { data: 'AQID' },
+                signatures: [],
+                metadata: {
+                  proposal_type: 'add_signer',
+                  chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+                  salt: MOCK_SALT_HEX,
+                  target_threshold: 1,
+                  signer_commitments: ['0x' + 'a'.repeat(64)],
+                  description: '',
+                },
+              },
+              status: {
+                status: 'pending',
+                timestamp: '2024-01-01T00:00:00Z',
+                proposer_id: '0x' + 'c'.repeat(64),
+                cosigner_sigs: [],
+              },
+            },
+          ],
+        }),
+      });
+
+      // Deserializes fine, but pins a different block than the one bound into
+      // the summary (mock summary blockCommitment is 'b' * 64).
+      const freed = vi.fn();
+      vi.mocked(chainAnchorFromBase64).mockReturnValueOnce({
+        commitment: () => ({ toHex: () => '0x' + 'e'.repeat(64) }),
+        free: freed,
+        serialize: () => new Uint8Array([9, 9, 9]),
+      } as never);
+
+      const reExecutionsBefore = vi.mocked(executeForSummaryAt).mock.calls.length;
+      const [listed] = await multisig.syncProposals();
+      expect(listed.verification).toMatchObject({
+        status: 'failed',
+        retryable: false,
+        message: expect.stringContaining(
+          'chain anchor does not match the block commitment bound into the tx_summary'
+        ),
+      });
+      expect(vi.mocked(executeForSummaryAt).mock.calls.length).toBe(reExecutionsBefore);
+      expect(freed).toHaveBeenCalledTimes(1);
+    });
+
+    /// Issue #462: one proposal whose binding fails (here: a served salt that
+    /// rebuilds to a different summary) must not hide the healthy one. Both
+    /// are returned; only the bad one carries `verificationError`.
+    it('lists a verified and an unverifiable proposal side by side (issue #462)', async () => {
+      const config = {
+        threshold: 2,
+        signerCommitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+      const delta = (nonce: number, txSummary: string) => ({
+        account_id: '0x' + 'a'.repeat(30),
+        nonce,
+        prev_commitment: '0x' + 'b'.repeat(64),
+        delta_payload: {
+          tx_summary: { data: txSummary },
+          signatures: [],
+          metadata: {
+            proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
+            target_threshold: 1,
+            signer_commitments: ['0x' + 'a'.repeat(64)],
+            description: '',
+          },
+        },
+        status: {
+          status: 'pending',
+          timestamp: '2024-01-01T00:00:00Z',
+          proposer_id: '0x' + 'c'.repeat(64),
+          cosigner_sigs: [],
+        },
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        // 'AQIDBA==' (4 bytes) commits to 0xdd…, 'AQID' (3 bytes) to 0xcc…; the
+        // mocked re-execution reproduces 0xcc… only, so the first is unverifiable.
+        json: async () => ({ proposals: [delta(1, 'AQIDBA=='), delta(2, 'AQID')] }),
+      });
+
+      const proposals = await multisig.syncProposals();
+      expect(proposals).toHaveLength(2);
+      const bad = proposals.find((p) => p.nonce === 1);
+      const good = proposals.find((p) => p.nonce === 2);
+      expect(bad?.verification).toMatchObject({
+        status: 'failed',
+        retryable: false,
+        message: expect.stringContaining('metadata does not match tx_summary'),
+      });
+      expect(good?.verification).toEqual({ status: 'verified' });
+
+      // Signing re-verifies and refuses the unverifiable one; the listing did
+      // not make it signable.
+      await expect(multisig.signProposal(bad!.id)).rejects.toThrow(
+        'metadata does not match tx_summary'
       );
+    });
+
+    /// `status` keeps meaning "threshold met"; actionable is verified AND ready.
+    it('isProposalActionable requires both a verified check and a met threshold (issue #462)', async () => {
+      const base = {
+        id: '0x' + '1'.repeat(64),
+        accountId: '0x' + 'a'.repeat(30),
+        nonce: 1,
+        txSummary: 'AQID',
+        signatures: [],
+        metadata: { proposalType: 'custom', description: '' },
+      } as unknown as Proposal;
+      const verified = { status: 'verified' } as const;
+      const failed = { status: 'failed', retryable: false, message: 'pruned' } as const;
+      expect(isProposalActionable({ ...base, status: 'ready', verification: verified })).toBe(true);
+      expect(isProposalActionable({ ...base, status: 'pending', verification: verified })).toBe(false);
+      expect(isProposalActionable({ ...base, status: 'ready', verification: failed })).toBe(false);
+      expect(isProposalActionable({ ...base, status: 'ready', verification: { status: 'unchecked' } })).toBe(false);
+    });
+
+    /// Issue #409: a cosigner syncing at a later block than the proposer must
+    /// still reproduce the signed summary. Verification therefore re-executes
+    /// at the anchor decoded from the proposal's own metadata — never at this
+    /// client's sync height — and releases that anchor once done.
+    it('should re-execute a pending proposal at the anchor from its metadata, not the sync height (issue #409)', async () => {
+      const config = {
+        threshold: 2,
+        signerCommitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+
+      const multisig = createTestMultisig(config);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          proposals: [
+            {
+              account_id: '0x' + 'a'.repeat(30),
+              nonce: 1,
+              prev_commitment: '0x' + 'b'.repeat(64),
+              delta_payload: {
+                tx_summary: { data: 'AQID' },
+                signatures: [],
+                metadata: {
+                  proposal_type: 'add_signer',
+                  chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+                  salt: MOCK_SALT_HEX,
+                  target_threshold: 1,
+                  signer_commitments: ['0x' + 'a'.repeat(64)],
+                  description: '',
+                },
+              },
+              status: {
+                status: 'pending',
+                timestamp: '2024-01-01T00:00:00Z',
+                proposer_id: '0x' + 'c'.repeat(64),
+                cosigner_sigs: [],
+              },
+            },
+          ],
+        }),
+      });
+
+      // The anchor decoded from this proposal's metadata, pinned to the block
+      // bound into the summary (mock summary blockCommitment is 'b' * 64).
+      const freed = vi.fn();
+      const proposalAnchor = {
+        commitment: () => ({ toHex: () => '0x' + 'b'.repeat(64) }),
+        blockNum: () => MOCK_ANCHOR_BLOCK_NUM,
+        free: freed,
+        serialize: () => new Uint8Array([9, 9, 9]),
+      };
+      vi.mocked(chainAnchorFromBase64).mockClear();
+      vi.mocked(chainAnchorFromBase64).mockReturnValueOnce(proposalAnchor as never);
+      vi.mocked(executeForSummary).mockClear();
+      vi.mocked(executeForSummaryAt).mockClear();
+
+      const proposals = await multisig.syncProposals();
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].verification).toEqual({ status: 'verified' });
+
+      expect(chainAnchorFromBase64).toHaveBeenCalledWith(MOCK_CHAIN_ANCHOR_B64);
+      // Re-executed exactly once, at that decoded anchor object — not a
+      // freshly captured one, and never via the sync-height variant.
+      expect(executeForSummaryAt).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(executeForSummaryAt).mock.calls[0][3]).toBe(proposalAnchor);
+      expect(executeForSummary).not.toHaveBeenCalled();
+      expect(freed).toHaveBeenCalledTimes(1);
+    });
+
+    /// Issue #409, second cause: miden-client consumes a note as authenticated
+    /// or unauthenticated depending on the local store, and the two commit
+    /// differently. Verification must put the store in the canonical
+    /// (authenticated) mode for the proposal's embedded notes BEFORE it
+    /// rebuilds and re-executes.
+    it('authenticates a consume_notes v2 proposal\'s embedded notes before re-executing (issue #409)', async () => {
+      const config = {
+        threshold: 2,
+        signerCommitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+      const noteId = '0x' + '77'.repeat(32);
+      const embeddedNote = { id: () => ({ toString: () => noteId }) };
+      mockNoteDeserialize.mockReturnValue(embeddedNote);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          proposals: [
+            {
+              account_id: '0x' + 'a'.repeat(30),
+              nonce: 1,
+              prev_commitment: '0x' + 'b'.repeat(64),
+              delta_payload: {
+                tx_summary: { data: 'AQID' },
+                signatures: [],
+                metadata: {
+                  proposal_type: 'consume_notes',
+                  consume_notes_metadata_version: 2,
+                  note_ids: [noteId],
+                  consume_notes_notes: ['bm90ZQ=='],
+                  chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+                  salt: MOCK_SALT_HEX,
+                  description: '',
+                },
+              },
+              status: {
+                status: 'pending',
+                timestamp: '2024-01-01T00:00:00Z',
+                proposer_id: '0x' + 'c'.repeat(64),
+                cosigner_sigs: [],
+              },
+            },
+          ],
+        }),
+      });
+
+      const order: string[] = [];
+      mockEnsureNotesAuthenticated.mockClear();
+      mockEnsureNotesAuthenticated.mockImplementationOnce(async () => {
+        order.push('authenticate');
+      });
+      vi.mocked(executeForSummaryAt).mockClear();
+      vi.mocked(executeForSummaryAt).mockImplementationOnce(async () => {
+        order.push('re-execute');
+        return {
+          toCommitment: () => ({ toHex: () => '0x' + 'c'.repeat(64) }),
+          serialize: () => new Uint8Array([1, 2, 3]),
+        } as never;
+      });
+
+      const proposals = await multisig.syncProposals();
+      expect(proposals).toHaveLength(1);
+
+      expect(mockEnsureNotesAuthenticated).toHaveBeenCalledTimes(1);
+      const [, notes, options] = mockEnsureNotesAuthenticated.mock.calls[0] as unknown as [
+        unknown,
+        unknown[],
+        { midenRpcEndpoint: string },
+      ];
+      expect(notes).toEqual([embeddedNote]);
+      expect(options.midenRpcEndpoint).toEqual(expect.any(String));
+      expect(order).toEqual(['authenticate', 're-execute']);
+    });
+
+    it('does not touch note authentication for proposals without input notes', async () => {
+      const config = {
+        threshold: 2,
+        signerCommitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          proposals: [
+            {
+              account_id: '0x' + 'a'.repeat(30),
+              nonce: 1,
+              prev_commitment: '0x' + 'b'.repeat(64),
+              delta_payload: {
+                tx_summary: { data: 'AQID' },
+                signatures: [],
+                metadata: {
+                  proposal_type: 'add_signer',
+                  chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+                  salt: MOCK_SALT_HEX,
+                  target_threshold: 1,
+                  signer_commitments: ['0x' + 'a'.repeat(64)],
+                  description: '',
+                },
+              },
+              status: {
+                status: 'pending',
+                timestamp: '2024-01-01T00:00:00Z',
+                proposer_id: '0x' + 'c'.repeat(64),
+                cosigner_sigs: [],
+              },
+            },
+          ],
+        }),
+      });
+      mockEnsureNotesAuthenticated.mockClear();
+      await multisig.syncProposals();
+      expect(mockEnsureNotesAuthenticated).not.toHaveBeenCalled();
     });
 
     it('should reject non-32-byte signer IDs from GUARDIAN proposals', async () => {
@@ -1072,6 +2566,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'add_signer',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               target_threshold: 1,
               signer_commitments: ['0x' + 'a'.repeat(64)],
               description: '',
@@ -1119,6 +2615,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'add_signer',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               target_threshold: 2,
               signer_commitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
               description: '',
@@ -1202,6 +2700,8 @@ describe('Multisig', () => {
 
       const proposal = await multisig.createProposal(1, 'AQID', {
         proposalType: 'add_signer',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
         targetThreshold: 1,
         targetSignerCommitments: ['0x' + 'a'.repeat(64)],
         description: '',
@@ -1247,6 +2747,8 @@ describe('Multisig', () => {
       await expect(
         multisig.createProposal(1, 'AQID', {
           proposalType: 'add_signer',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           targetThreshold: 1,
           targetSignerCommitments: ['0x' + 'a'.repeat(64)],
           description: '',
@@ -1289,7 +2791,7 @@ describe('Multisig', () => {
         }),
       });
 
-      vi.mocked(executeForSummary).mockResolvedValueOnce({
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
         toCommitment: () => ({
           toHex: () => '0x' + 'f'.repeat(64),
         }),
@@ -1298,6 +2800,8 @@ describe('Multisig', () => {
       await expect(
         multisig.createProposal(1, 'AQID', {
           proposalType: 'add_signer',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           targetThreshold: 1,
           targetSignerCommitments: ['0x' + 'a'.repeat(64)],
           description: '',
@@ -1310,10 +2814,13 @@ describe('Multisig', () => {
     it('should include the faucet asset in the proposal description', async () => {
       const { executeForSummary } = await import('./transaction.js');
       vi.mocked(executeForSummary).mockResolvedValue({
-        toCommitment: () => ({
-          toHex: () => '0x' + 'c'.repeat(64),
-        }),
-        serialize: () => new Uint8Array([1, 2, 3]),
+        summary: {
+          toCommitment: () => ({
+            toHex: () => '0x' + 'c'.repeat(64),
+          }),
+          serialize: () => new Uint8Array([1, 2, 3]),
+      },
+        anchor: createMockChainAnchor(),
       } as any);
 
       const config = {
@@ -1333,6 +2840,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: 'p2id',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             recipient_id: '0xrecipient',
             faucet_id: '0xfaucet',
             amount: '100',
@@ -1355,7 +2864,7 @@ describe('Multisig', () => {
         }),
       });
 
-      const proposal = await multisig.createP2idProposal('0xrecipient', '0xfaucet', 100n, 1);
+      const proposal = await multisig.createP2idProposal('0xrecipient', '0xfaucet', 100n, { nonce: 1 });
 
       expect(proposal.metadata.description).toBe('Send 100 of asset 0xfaucet... to 0xrecipien...');
     });
@@ -1364,10 +2873,13 @@ describe('Multisig', () => {
       const { executeForSummary, buildP2idTransactionRequest } = await import('./transaction.js');
       const { NoteType } = await import('@miden-sdk/miden-sdk');
       vi.mocked(executeForSummary).mockResolvedValue({
-        toCommitment: () => ({
-          toHex: () => '0x' + 'c'.repeat(64),
-        }),
-        serialize: () => new Uint8Array([1, 2, 3]),
+        summary: {
+          toCommitment: () => ({
+            toHex: () => '0x' + 'c'.repeat(64),
+          }),
+          serialize: () => new Uint8Array([1, 2, 3]),
+      },
+        anchor: createMockChainAnchor(),
       } as any);
 
       const config = {
@@ -1387,6 +2899,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: 'p2id',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             recipient_id: '0xrecipient',
             faucet_id: '0xfaucet',
             amount: '100',
@@ -1410,17 +2924,18 @@ describe('Multisig', () => {
         }),
       });
 
-      const proposal = await multisig.createP2idProposal('0xrecipient', '0xfaucet', 100n, 1, {
+      const proposal = await multisig.createP2idProposal('0xrecipient', '0xfaucet', 100n, {
+        nonce: 1,
         noteType: NoteType.Private,
       });
 
       // Propose path builds the private note...
       expect(vi.mocked(buildP2idTransactionRequest)).toHaveBeenCalledWith(
+        mockWebClient,
         expect.any(String),
         '0xrecipient',
         '0xfaucet',
         100n,
-        expect.anything(),
         { noteType: NoteType.Private },
       );
       // ...and the rebuild-from-metadata path parses note_type back to Private.
@@ -1434,6 +2949,137 @@ describe('Multisig', () => {
 
       expect(proposal.metadata.proposalType).toBe('p2id');
       expect((proposal.metadata as { noteType?: string }).noteType).toBe('private');
+    });
+
+    it('threads P2IDE reclaim/timelock heights into the request and wire metadata (issue #366)', async () => {
+      const { executeForSummary, buildP2idTransactionRequest } = await import('./transaction.js');
+      vi.mocked(executeForSummary).mockResolvedValue({
+        summary: {
+          toCommitment: () => ({
+            toHex: () => '0x' + 'c'.repeat(64),
+          }),
+          serialize: () => new Uint8Array([1, 2, 3]),
+        },
+        anchor: createMockChainAnchor(),
+      } as any);
+
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+
+      const multisig = createTestMultisig(config);
+
+      const mockDelta = {
+        account_id: '0x' + 'a'.repeat(30),
+        nonce: 1,
+        prev_commitment: '0x' + 'b'.repeat(64),
+        delta_payload: {
+          tx_summary: { data: 'AQID' },
+          signatures: [],
+          metadata: {
+            proposal_type: 'p2id',
+            recipient_id: '0xrecipient',
+            faucet_id: '0xfaucet',
+            amount: '100',
+            reclaim_height: 12345,
+            timelock_height: 700,
+            description: '',
+          },
+        },
+        status: {
+          status: 'pending',
+          timestamp: '2024-01-01T00:00:00Z',
+          proposer_id: '0x' + 'c'.repeat(64),
+          cosigner_sigs: [],
+        },
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          delta: mockDelta,
+          commitment: '0x' + 'c'.repeat(64),
+        }),
+      });
+
+      const proposal = await multisig.createP2idProposal('0xrecipient', '0xfaucet', 100n, {
+        nonce: 1,
+        reclaimHeight: 12345,
+        timelockHeight: 700,
+      });
+
+      // Propose path builds the P2IDE note from the heights...
+      const lastCall = vi.mocked(buildP2idTransactionRequest).mock.calls.at(-1)!;
+      expect(lastCall[5]).toMatchObject({ reclaimHeight: 12345, timelockHeight: 700 });
+
+      // ...and the pushed wire metadata carries the heights so cosigners
+      // rebuild the same P2IDE note at verification/execution.
+      const pushBody = JSON.parse(mockFetch.mock.calls.at(-1)![1].body as string);
+      expect(pushBody.delta_payload.metadata.reclaim_height).toBe(12345);
+      expect(pushBody.delta_payload.metadata.timelock_height).toBe(700);
+
+      expect(proposal.metadata.proposalType).toBe('p2id');
+      expect(proposal.metadata).toMatchObject({ reclaimHeight: 12345, timelockHeight: 700 });
+    });
+
+    it('omits the heights from wire metadata for a plain P2ID send (pre-#366 shape)', async () => {
+      const { executeForSummary } = await import('./transaction.js');
+      vi.mocked(executeForSummary).mockResolvedValue({
+        summary: {
+          toCommitment: () => ({
+            toHex: () => '0x' + 'c'.repeat(64),
+          }),
+          serialize: () => new Uint8Array([1, 2, 3]),
+        },
+        anchor: createMockChainAnchor(),
+      } as any);
+
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+
+      const multisig = createTestMultisig(config);
+
+      const mockDelta = {
+        account_id: '0x' + 'a'.repeat(30),
+        nonce: 1,
+        prev_commitment: '0x' + 'b'.repeat(64),
+        delta_payload: {
+          tx_summary: { data: 'AQID' },
+          signatures: [],
+          metadata: {
+            proposal_type: 'p2id',
+            recipient_id: '0xrecipient',
+            faucet_id: '0xfaucet',
+            amount: '100',
+            description: '',
+          },
+        },
+        status: {
+          status: 'pending',
+          timestamp: '2024-01-01T00:00:00Z',
+          proposer_id: '0x' + 'c'.repeat(64),
+          cosigner_sigs: [],
+        },
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          delta: mockDelta,
+          commitment: '0x' + 'c'.repeat(64),
+        }),
+      });
+
+      await multisig.createP2idProposal('0xrecipient', '0xfaucet', 100n, { nonce: 1 });
+
+      const pushBody = JSON.parse(mockFetch.mock.calls.at(-1)![1].body as string);
+      expect('reclaim_height' in pushBody.delta_payload.metadata).toBe(false);
+      expect('timelock_height' in pushBody.delta_payload.metadata).toBe(false);
     });
   });
 
@@ -1561,6 +3207,7 @@ describe('Multisig', () => {
       const proposal = {
         metadata: {
           proposalType: 'p2id',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
           recipientId: '0x' + 'b'.repeat(30),
           faucetId: '0x' + 'c'.repeat(30),
           amount: '100',
@@ -1588,10 +3235,13 @@ describe('Multisig', () => {
   describe('createChangeThresholdProposal', () => {
     it('passes the signer scheme to update-signers requests', async () => {
       vi.mocked(executeForSummary).mockResolvedValue({
-        toCommitment: () => ({
-          toHex: () => '0x' + 'c'.repeat(64),
-        }),
-        serialize: () => new Uint8Array([1, 2, 3]),
+        summary: {
+          toCommitment: () => ({
+            toHex: () => '0x' + 'c'.repeat(64),
+          }),
+          serialize: () => new Uint8Array([1, 2, 3]),
+      },
+        anchor: createMockChainAnchor(),
       } as any);
 
       const ecdsaSigner: Signer = {
@@ -1616,6 +3266,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: 'change_threshold',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             target_threshold: 2,
             description: '',
           },
@@ -1637,265 +3289,189 @@ describe('Multisig', () => {
       });
 
       const multisig = createTestMultisig(config, ecdsaSigner);
-      await multisig.createChangeThresholdProposal(2, 1);
+      await multisig.createChangeThresholdProposal(2, { nonce: 1 });
 
       expect(buildUpdateSignersTransactionRequest).toHaveBeenCalledWith(
         mockWebClient,
         2,
         config.signerCommitments,
-        { signatureScheme: 'ecdsa' },
+        { accountId: expect.any(String), signatureScheme: 'ecdsa' },
       );
     });
   });
 
-  describe('createSwitchGuardianProposal', () => {
-    const buildFallbackMultisig = () =>
-      createTestMultisig({
-        threshold: 1,
-        signerCommitments: [mockSigner.commitment],
-        guardianCommitment: '0x' + 'c'.repeat(64),
-      });
+  describe('createAddSignerProposal / createRemoveSignerProposal', () => {
+    const config = {
+      threshold: 2,
+      signerCommitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64), '0x' + 'd'.repeat(64)],
+      guardianCommitment: '0x' + 'c'.repeat(64),
+    };
 
-    it('finds an offline proposal by a non-normalized id', async () => {
-      vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      } as any);
-      const multisig = buildFallbackMultisig();
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ commitment: newGuardianPubkey }),
-      });
-      mockFetch.mockImplementation(() => {
-        throw new Error('the guardian being replaced must not be contacted');
-      });
-
-      const proposal = await multisig.createSwitchGuardianProposalOffline(
-        'http://new-guardian.com',
-        newGuardianPubkey,
-      );
-      const upperCased = '0x' + proposal.id.slice(2).toUpperCase();
-
-      expect(() => multisig.exportProposalToJson(upperCased)).not.toThrow();
-      await expect(multisig.signProposalOffline(upperCased)).resolves.toBeTypeOf('string');
-    });
-
-    it('falls back to the offline builder when the guardian is unreachable', async () => {
-      vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      } as any);
-      const multisig = buildFallbackMultisig();
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
-
-      mockFetch.mockImplementation((url: string) => {
-        if (String(url).includes('localhost:3000')) {
-          return Promise.reject(new TypeError('Failed to fetch'));
-        }
-        return Promise.resolve({ ok: true, json: async () => ({ commitment: newGuardianPubkey }) });
-      });
-
-      const result = await multisig.createSwitchGuardianProposalWithFallback(
-        'http://new-guardian.com',
-        newGuardianPubkey,
-      );
-
-      expect(result.mode).toBe('offline');
-      expect(result.proposal.signatures).toEqual([]);
-    });
-
-    it('stays online when the guardian answers', async () => {
-      vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      } as any);
-      const multisig = buildFallbackMultisig();
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ commitment: newGuardianPubkey }),
-      });
+    const mockPushResponse = (proposalType: string) => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
           delta: {
-            account_id: multisig.accountId,
+            account_id: '0x' + 'a'.repeat(30),
             nonce: 1,
             prev_commitment: '0x' + 'b'.repeat(64),
             delta_payload: {
               tx_summary: { data: 'AQID' },
               signatures: [],
-              metadata: {
-                proposal_type: 'switch_guardian',
-                new_guardian_pubkey: newGuardianPubkey,
-                new_guardian_endpoint: 'http://new-guardian.com',
-              },
+              metadata: { proposal_type: proposalType, description: '' },
             },
             status: {
               status: 'pending',
               timestamp: '2024-01-01T00:00:00Z',
-              proposer_id: mockSigner.commitment,
+              proposer_id: '0x' + 'c'.repeat(64),
               cosigner_sigs: [],
             },
           },
           commitment: '0x' + 'c'.repeat(64),
         }),
       });
+    };
 
-      const result = await multisig.createSwitchGuardianProposalWithFallback(
-        'http://new-guardian.com',
-        newGuardianPubkey,
-        42,
+    beforeEach(() => {
+      vi.mocked(executeForSummary).mockResolvedValue({
+        summary: {
+          toCommitment: () => ({ toHex: () => '0x' + 'c'.repeat(64) }),
+          serialize: () => new Uint8Array([1, 2, 3]),
+        },
+        anchor: createMockChainAnchor(),
+      } as any);
+    });
+
+    it('add: passes newThreshold from the options bag and appends the commitment', async () => {
+      mockPushResponse('add_signer');
+      const newCommitment = '0x' + 'e'.repeat(64);
+
+      const multisig = createTestMultisig(config);
+      await multisig.createAddSignerProposal(newCommitment, { nonce: 1, newThreshold: 3 });
+
+      expect(buildUpdateSignersTransactionRequest).toHaveBeenCalledWith(
+        mockWebClient,
+        3,
+        [...config.signerCommitments, newCommitment],
+        { accountId: expect.any(String), signatureScheme: mockSigner.scheme },
       );
-
-      expect(result.mode).toBe('online');
-      // The fallback builds its own request rather than calling createProposal,
-      // so pin what it sends: this is the online path the plan forbids changing.
-      const push = mockFetch.mock.calls.find(call => String(call[0]).includes('/delta/proposal'));
-      const pushed = JSON.parse(String(push?.[1].body));
-      expect(pushed.account_id).toBe(multisig.accountId);
-      expect(pushed.nonce).toBe(42);
-      expect(pushed.delta_payload.metadata.proposal_type).toBe('switch_guardian');
-      expect(pushed.delta_payload.tx_summary.data).toBe('AQID');
-      expect(pushed.delta_payload.metadata.new_guardian_endpoint).toBe('http://new-guardian.com');
     });
 
-    it('does not fall back when the guardian rejects the proposal on its merits', async () => {
-      vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      } as any);
-      const multisig = buildFallbackMultisig();
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ commitment: newGuardianPubkey }),
-      });
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 409,
-        statusText: 'Conflict',
-        headers: { get: () => null },
-        text: async () => JSON.stringify({ error: 'conflict' }),
-      });
+    it('add: rejects the GUARDIAN commitment as a signer before collecting signatures', async () => {
+      const multisig = createTestMultisig(config);
 
       await expect(
-        multisig.createSwitchGuardianProposalWithFallback(
-          'http://new-guardian.com',
-          newGuardianPubkey,
-        ),
-      ).rejects.toBeInstanceOf(GuardianHttpError);
-      expect(mockFetch).toHaveBeenCalledTimes(2);
-      expect((multisig as any).proposals.size).toBe(0);
+        multisig.createAddSignerProposal(config.guardianCommitment, { nonce: 1 }),
+      ).rejects.toThrow(/different from all signer commitments/);
+      expect(buildUpdateSignersTransactionRequest).not.toHaveBeenCalled();
     });
 
-    it('does not fall back when the push failed but the guardian is still answering', async () => {
-      vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      } as any);
-      const multisig = buildFallbackMultisig();
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ commitment: newGuardianPubkey }),
-      });
-      // The push looks like a lost connection but the guardian answers the probe:
-      // it may already hold the proposal, so a fallback would duplicate it.
-      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ commitment: '0x' + 'c'.repeat(64) }),
-      });
+    it('add: rejects growing the signer set past the on-chain cap of 64', async () => {
+      const full = {
+        threshold: 1,
+        signerCommitments: Array.from({ length: 64 }, (_, i) =>
+          '0x' + i.toString(16).padStart(64, '0'),
+        ),
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(full);
 
       await expect(
-        multisig.createSwitchGuardianProposalWithFallback(
-          'http://new-guardian.com',
-          newGuardianPubkey,
-        ),
-      ).rejects.toThrow();
-      expect((multisig as any).proposals.size).toBe(0);
-      expect(mockFetch).toHaveBeenCalledTimes(3);
+        multisig.createAddSignerProposal('0x' + 'e'.repeat(64), { nonce: 1 }),
+      ).rejects.toThrow(/at most 64/);
+      expect(buildUpdateSignersTransactionRequest).not.toHaveBeenCalled();
     });
 
-    it('falls back when a gateway answers 502 for a dead guardian', async () => {
-      vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      } as any);
-      const multisig = buildFallbackMultisig();
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
+    it('add: defaults to the current threshold when newThreshold is omitted', async () => {
+      mockPushResponse('add_signer');
 
-      mockFetch.mockImplementation((url: string) => {
-        if (String(url).includes('new-guardian.com')) {
-          return Promise.resolve({ ok: true, json: async () => ({ commitment: newGuardianPubkey }) });
-        }
-        // A dead CVM behind the dstack gateway looks like this, not like a
-        // refused connection.
-        return Promise.resolve({
-          ok: false,
-          status: 502,
-          statusText: 'Bad Gateway',
-          headers: { get: () => null },
-          text: async () => '<html>nope</html>',
-        });
-      });
+      const multisig = createTestMultisig(config);
+      await multisig.createAddSignerProposal('0x' + 'e'.repeat(64), { nonce: 1 });
 
-      const result = await multisig.createSwitchGuardianProposalWithFallback(
-        'http://new-guardian.com',
-        newGuardianPubkey,
+      expect(buildUpdateSignersTransactionRequest).toHaveBeenCalledWith(
+        mockWebClient,
+        config.threshold,
+        expect.any(Array),
+        { accountId: expect.any(String), signatureScheme: mockSigner.scheme },
       );
-
-      expect(result.mode).toBe('offline');
     });
 
-    it('does not fall back when the push landed but the response was unusable', async () => {
-      vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      } as any);
-      const multisig = buildFallbackMultisig();
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
+    it('remove: passes newThreshold from the options bag and drops the commitment', async () => {
+      mockPushResponse('remove_signer');
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ commitment: newGuardianPubkey }),
-      });
-      // The guardian stored the proposal and answered 200 with a body this
-      // client cannot read; falling back would leave a copy on both sides.
-      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+      const multisig = createTestMultisig(config);
+      await multisig.createRemoveSignerProposal('0x' + 'd'.repeat(64), { nonce: 1, newThreshold: 1 });
+
+      expect(buildUpdateSignersTransactionRequest).toHaveBeenCalledWith(
+        mockWebClient,
+        1,
+        [config.signerCommitments[0], config.signerCommitments[1]],
+        { accountId: expect.any(String), signatureScheme: mockSigner.scheme },
+      );
+    });
+
+    it('remove: defaults to min(current threshold, remaining signers) when newThreshold is omitted', async () => {
+      mockPushResponse('remove_signer');
+
+      const multisig = createTestMultisig(config);
+      await multisig.createRemoveSignerProposal('0x' + 'd'.repeat(64), { nonce: 1 });
+
+      expect(buildUpdateSignersTransactionRequest).toHaveBeenCalledWith(
+        mockWebClient,
+        2,
+        expect.any(Array),
+        { accountId: expect.any(String), signatureScheme: mockSigner.scheme },
+      );
+    });
+  });
+
+  describe('legacy positional-caller guard (issue #387)', () => {
+    const config = {
+      threshold: 1,
+      signerCommitments: ['0x' + 'a'.repeat(64)],
+      guardianCommitment: '0x' + 'c'.repeat(64),
+    };
+
+    it('rejects a legacy positional nonce where the options bag is expected', async () => {
+      const multisig = createTestMultisig(config);
+
       await expect(
-        multisig.createSwitchGuardianProposalWithFallback(
-          'http://new-guardian.com',
-          newGuardianPubkey,
-        ),
-      ).rejects.toThrow();
-      expect((multisig as any).proposals.size).toBe(0);
-      // No probe: an unreadable body is not a connectivity failure, so the
-      // classifier rules out the fallback without asking.
-      expect(mockFetch).toHaveBeenCalledTimes(2);
-    });
-
-    it('does not fall back when the NEW guardian is the unreachable one', async () => {
-      vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      } as any);
-      const multisig = buildFallbackMultisig();
-
-      // Both hosts dead: nothing may be built against a new endpoint that was
-      // never verified, whatever the old guardian is doing.
-      mockFetch.mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
-
+        multisig.createP2idProposal('0xrecipient', '0xfaucet', 100n, 1 as any),
+      ).rejects.toThrow(/issue #387/);
       await expect(
-        multisig.createSwitchGuardianProposalWithFallback(
-          'http://new-guardian.com',
-          '0x' + '9'.repeat(64),
-        ),
-      ).rejects.toThrow('Could not reach Guardian');
-      expect((multisig as any).proposals.size).toBe(0);
+        multisig.createConsumeNotesProposal(['0x1'], 1 as any),
+      ).rejects.toThrow(/issue #387/);
+      await expect(
+        multisig.createAddSignerProposal('0x' + 'e'.repeat(64), 1 as any),
+      ).rejects.toThrow(/issue #387/);
+      await expect(
+        multisig.createCustomProposal(new Uint8Array([1]), 'label', 1 as any),
+      ).rejects.toThrow(/issue #387/);
     });
 
+    it('rejects a legacy trailing argument after the options slot', async () => {
+      const multisig = createTestMultisig(config);
+
+      // Pre-#387 pattern: createP2idProposal(r, f, amount, nonceHole, { noteType })
+      await expect(
+        (multisig.createP2idProposal as any)('0xrecipient', '0xfaucet', 100n, undefined, {
+          noteType: 'private',
+        }),
+      ).rejects.toThrow(/issue #387/);
+      // Pre-#387 pattern: createAddSignerProposal(commitment, nonceHole, newThreshold)
+      await expect(
+        (multisig.createAddSignerProposal as any)('0x' + 'e'.repeat(64), undefined, 3),
+      ).rejects.toThrow(/issue #387/);
+    });
+  });
+
+  describe('createSwitchGuardianProposal', () => {
     it('should verify new endpoint commitment before creating proposal', async () => {
       vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
+        summary: {
+          serialize: () => new Uint8Array([1, 2, 3]),
+      },
+        anchor: createMockChainAnchor(),
       } as any);
 
       const config = {
@@ -1942,51 +3518,26 @@ describe('Multisig', () => {
       );
     });
 
-    it('offline creation and signing never contact the guardian being replaced', async () => {
-      vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      } as any);
-
+    it('rejects a new GUARDIAN that is one of the approvers before contacting its endpoint', async () => {
       const multisig = createTestMultisig({
         threshold: 1,
-        signerCommitments: [mockSigner.commitment],
+        signerCommitments: ['0x' + 'a'.repeat(64)],
         guardianCommitment: '0x' + 'c'.repeat(64),
       });
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ commitment: newGuardianPubkey }),
-      });
-      mockFetch.mockImplementation(() => {
-        throw new Error('the guardian being replaced must not be contacted');
-      });
-
-      const proposal = await multisig.createSwitchGuardianProposalOffline(
-        'http://new-guardian.com',
-        newGuardianPubkey,
-      );
-
-      expect(proposal.signatures).toEqual([]);
-      expect(proposal.status).toBe('pending');
-
-      const exported = await multisig.signProposalOffline(proposal.id);
-      const signed = await multisig.importProposal(exported);
-
-      expect(signed.signatures).toHaveLength(1);
-      expect(signed.signatures[0]?.signerId).toBe(mockSigner.commitment);
-      expect(signed.status).toBe('ready');
-
-      // The count alone would pass if a request went to the wrong host, so pin
-      // the host: only the new guardian may ever be called.
-      const hosts = mockFetch.mock.calls.map(call => String(call[0]));
-      expect(hosts).toHaveLength(1);
-      expect(hosts[0]).toContain('new-guardian.com');
+      await expect(
+        multisig.createSwitchGuardianProposal('http://new-guardian.com', '0x' + 'a'.repeat(64)),
+      ).rejects.toThrow(/different from all signer commitments/);
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(buildUpdateGuardianTransactionRequest).not.toHaveBeenCalled();
     });
 
     it('should reject switch proposal when endpoint commitment does not match', async () => {
       vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
+        summary: {
+          serialize: () => new Uint8Array([1, 2, 3]),
+      },
+        anchor: createMockChainAnchor(),
       } as any);
 
       const config = {
@@ -2009,7 +3560,10 @@ describe('Multisig', () => {
 
     it('should use the signer scheme when resolving new GUARDIAN commitments', async () => {
       vi.mocked(executeForSummary).mockResolvedValue({
-        serialize: () => new Uint8Array([1, 2, 3]),
+        summary: {
+          serialize: () => new Uint8Array([1, 2, 3]),
+      },
+        anchor: createMockChainAnchor(),
       } as any);
 
       const ecdsaSigner: Signer = {
@@ -2060,18 +3614,250 @@ describe('Multisig', () => {
       expect(buildUpdateGuardianTransactionRequest).toHaveBeenCalledWith(
         mockWebClient,
         newGuardianCommitment,
-        { signatureScheme: 'ecdsa' },
+        { accountId: expect.any(String), signatureScheme: 'ecdsa' },
       );
+    });
+  });
+
+  describe('createSwitchGuardianProposalOffline (issue #433)', () => {
+    const NEW_GUARDIAN_ENDPOINT = 'http://new-guardian.com';
+    const newGuardianPubkey = '0x' + '9'.repeat(64);
+
+    // Routes fetch by target: the new GUARDIAN answers, everything else — in
+    // particular the current GUARDIAN at localhost:3000 — is network-dead.
+    // This is the exact scenario the offline path exists for (0xMiden/wallet#782).
+    function stubFetchWithDeadCurrentGuardian(
+      newGuardianResponses: Record<string, unknown> = {},
+    ): void {
+      mockFetch.mockImplementation(async (url: string) => {
+        const parsed = new URL(url);
+        if (parsed.origin !== NEW_GUARDIAN_ENDPOINT) {
+          throw new Error(`current GUARDIAN unreachable: ${url}`);
+        }
+        if (parsed.pathname === '/pubkey') {
+          return { ok: true, json: async () => ({ commitment: newGuardianPubkey }) };
+        }
+        return {
+          ok: true,
+          json: async () => ({ success: true, message: 'ok', ...newGuardianResponses }),
+        };
+      });
+    }
+
+    it('keeps the cached offline proposal across listings that cannot include it', async () => {
+      // The current GUARDIAN never received this proposal, so its listings
+      // omit it forever; syncs must not expire it before export/execution.
+      const config = {
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+      stubFetchWithDeadCurrentGuardian();
+
+      const exported = await multisig.createSwitchGuardianProposalOffline(
+        NEW_GUARDIAN_ENDPOINT,
+        newGuardianPubkey,
+        { nonce: 7 },
+      );
+
+      mockFetch.mockImplementation(async () => ({
+        ok: true,
+        json: async () => ({ proposals: [] }),
+      }));
+      await multisig.syncProposals();
+      const second = await multisig.syncProposals();
+      expect(second.map((p) => p.id)).toEqual([exported.commitment]);
+      expect(multisig.listProposals().map((p) => p.id)).toEqual([exported.commitment]);
+    });
+
+    it('creates, signs, and caches the proposal without contacting the current GUARDIAN', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+      stubFetchWithDeadCurrentGuardian();
+
+      const exported = await multisig.createSwitchGuardianProposalOffline(
+        NEW_GUARDIAN_ENDPOINT,
+        newGuardianPubkey,
+        { nonce: 7 },
+      );
+
+      expect(exported.accountId).toBe(multisig.accountId);
+      expect(exported.nonce).toBe(7);
+      expect(exported.commitment).toBe('0x' + 'c'.repeat(64));
+      expect(exported.metadata.proposalType).toBe('switch_guardian');
+      if (exported.metadata.proposalType === 'switch_guardian') {
+        expect(exported.metadata.newGuardianEndpoint).toBe(NEW_GUARDIAN_ENDPOINT);
+        expect(exported.metadata.newGuardianPubkey).toBe(newGuardianPubkey);
+        expect(exported.metadata.chainAnchor).toBe(MOCK_CHAIN_ANCHOR_B64);
+        expect(exported.metadata.saltHex).toBe('0x' + 'd'.repeat(64));
+      }
+
+      // The proposer's signature is included, over the exported commitment.
+      expect(exported.signatures).toHaveLength(1);
+      expect(exported.signatures[0].commitment).toBe(mockSigner.commitment);
+      expect(exported.signatures[0].scheme).toBe('falcon');
+      expect(mockSigner.signCommitment).toHaveBeenCalledWith(exported.commitment);
+
+      // The only network call is the new endpoint's /pubkey verification.
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${NEW_GUARDIAN_ENDPOINT}/pubkey?scheme=falcon`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+      // Pre-build node sync (mirrors the Rust sync_network_only).
+      expect(mockWebClient.syncState).toHaveBeenCalled();
+
+      // Cached locally, ready at threshold 1 (proposer already signed).
+      const cached = multisig.listProposals();
+      expect(cached).toHaveLength(1);
+      expect(cached[0].id).toBe(exported.commitment);
+      expect(cached[0].status).toBe('ready');
+    });
+
+    it('picks up an on-chain threshold change during the pre-build sync (PR #436 review)', async () => {
+      const signerB = '0x' + '8'.repeat(64);
+      const config = {
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment, signerB],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+      stubFetchWithDeadCurrentGuardian();
+
+      // The synced store reports the threshold now at 2; with the stale
+      // cached config (threshold 1) the proposal would flip to 'ready' on the
+      // proposer's signature alone and fail only at submission.
+      mockWebClient.getAccount.mockResolvedValueOnce(mockedAccount('0x' + 'b'.repeat(64), 1));
+      mockDetectConfig.mockReturnValueOnce({
+        threshold: 2,
+        numSigners: 2,
+        signerCommitments: [mockSigner.commitment, signerB],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+        vaultBalances: [],
+        procedureThresholds: new Map(),
+      });
+
+      const exported = await multisig.createSwitchGuardianProposalOffline(
+        NEW_GUARDIAN_ENDPOINT,
+        newGuardianPubkey,
+        { nonce: 9 },
+      );
+
+      expect(exported.metadata.requiredSignatures).toBe(2);
+      expect(exported.signatures).toHaveLength(1);
+      expect(multisig.listProposals()[0].status).toBe('pending');
+    });
+
+    it('rejects when the new endpoint commitment does not match, before building or signing', async () => {
+      vi.mocked(buildUpdateGuardianTransactionRequest).mockClear();
+      const config = {
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: '0x' + '2'.repeat(64) }),
+      });
+
+      await expect(
+        multisig.createSwitchGuardianProposalOffline(NEW_GUARDIAN_ENDPOINT, newGuardianPubkey),
+      ).rejects.toThrow('Refusing to use GUARDIAN endpoint');
+      expect(buildUpdateGuardianTransactionRequest).not.toHaveBeenCalled();
+      expect(mockSigner.signCommitment).not.toHaveBeenCalled();
+      expect(multisig.listProposals()).toHaveLength(0);
+    });
+
+    it('rejects legacy positional callers (issue #387)', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: [mockSigner.commitment],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+
+      await expect(
+        (multisig.createSwitchGuardianProposalOffline as any)(
+          NEW_GUARDIAN_ENDPOINT,
+          newGuardianPubkey,
+          123,
+        ),
+      ).rejects.toThrow('trailing options object');
+    });
+
+    it('supports the full offline trio: create → cosign → execute against a dead current GUARDIAN', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const signerB: Signer = {
+          ...mockSigner,
+          commitment: '0x' + '8'.repeat(64),
+          signCommitment: vi.fn().mockReturnValue('0x' + 'e'.repeat(128)),
+        };
+        const config = {
+          threshold: 2,
+          signerCommitments: [mockSigner.commitment, signerB.commitment],
+          guardianCommitment: '0x' + 'c'.repeat(64),
+        };
+        stubFetchWithDeadCurrentGuardian({ ack_pubkey: '0x' + 'f'.repeat(64) });
+
+        // Proposer (signer A) creates the proposal fully offline.
+        const proposerClient = createTestMultisig(config);
+        const exported = await proposerClient.createSwitchGuardianProposalOffline(
+          NEW_GUARDIAN_ENDPOINT,
+          newGuardianPubkey,
+          { nonce: 1 },
+        );
+        expect(proposerClient.listProposals()[0].status).toBe('pending');
+
+        // Cosigner (signer B) imports and signs side-channel.
+        const cosignerClient = createTestMultisig(config, signerB);
+        const importedByCosigner = await cosignerClient.importProposal(JSON.stringify(exported));
+        expect(importedByCosigner.status).toBe('pending');
+        const signedJson = await cosignerClient.signProposalOffline(importedByCosigner.id);
+
+        // Proposer imports the cosigned proposal — now at threshold.
+        const readyProposal = await proposerClient.importProposal(signedJson);
+        expect(readyProposal.status).toBe('ready');
+        expect(readyProposal.signatures).toHaveLength(2);
+
+        // Execution succeeds with the current GUARDIAN unreachable: the
+        // canonicalization push is best-effort, and registration goes to the
+        // new GUARDIAN only.
+        mockWebClient.getAccount.mockResolvedValueOnce({
+          serialize: () => new Uint8Array([1, 2, 3]),
+        });
+        await expect(proposerClient.executeProposal(readyProposal.id)).resolves.toBeUndefined();
+
+        expect(mockWebClient.executeTransaction).toHaveBeenCalledTimes(1);
+        expect(mockWebClient.submitProvenTransaction).toHaveBeenCalledTimes(1);
+        expect(proposerClient.listProposals()[0].status).toBe('finalized');
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('pre-switch GUARDIAN'),
+          expect.any(Error),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 
   describe('createUpdateProcedureThresholdProposal', () => {
     it('should create procedure-threshold update proposals', async () => {
       vi.mocked(executeForSummary).mockResolvedValue({
-        toCommitment: () => ({
-          toHex: () => '0x' + 'c'.repeat(64),
-        }),
-        serialize: () => new Uint8Array([1, 2, 3]),
+        summary: {
+          toCommitment: () => ({
+            toHex: () => '0x' + 'c'.repeat(64),
+          }),
+          serialize: () => new Uint8Array([1, 2, 3]),
+      },
+        anchor: createMockChainAnchor(),
       } as any);
 
       const config = {
@@ -2091,6 +3877,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: 'update_procedure_threshold',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             target_threshold: 1,
             target_procedure: 'send_asset',
             description: '',
@@ -2112,13 +3900,13 @@ describe('Multisig', () => {
         }),
       });
 
-      const proposal = await multisig.createUpdateProcedureThresholdProposal('send_asset', 1, 1);
+      const proposal = await multisig.createUpdateProcedureThresholdProposal('send_asset', 1, { nonce: 1 });
 
       expect(buildUpdateProcedureThresholdTransactionRequest).toHaveBeenCalledWith(
         mockWebClient,
         'send_asset',
         1,
-        { signatureScheme: 'falcon' },
+        { accountId: expect.any(String), signatureScheme: 'falcon' },
       );
       expect(proposal.metadata.proposalType).toBe('update_procedure_threshold');
       if (proposal.metadata.proposalType === 'update_procedure_threshold') {
@@ -2129,10 +3917,13 @@ describe('Multisig', () => {
 
     it('passes the signer scheme to ECDSA procedure-threshold updates', async () => {
       vi.mocked(executeForSummary).mockResolvedValue({
-        toCommitment: () => ({
-          toHex: () => '0x' + 'c'.repeat(64),
-        }),
-        serialize: () => new Uint8Array([1, 2, 3]),
+        summary: {
+          toCommitment: () => ({
+            toHex: () => '0x' + 'c'.repeat(64),
+          }),
+          serialize: () => new Uint8Array([1, 2, 3]),
+      },
+        anchor: createMockChainAnchor(),
       } as any);
 
       const ecdsaSigner: Signer = {
@@ -2159,6 +3950,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: 'update_procedure_threshold',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             target_threshold: 1,
             target_procedure: 'send_asset',
             description: '',
@@ -2180,13 +3973,13 @@ describe('Multisig', () => {
         }),
       });
 
-      await multisig.createUpdateProcedureThresholdProposal('send_asset', 1, 1);
+      await multisig.createUpdateProcedureThresholdProposal('send_asset', 1, { nonce: 1 });
 
       expect(buildUpdateProcedureThresholdTransactionRequest).toHaveBeenCalledWith(
         mockWebClient,
         'send_asset',
         1,
-        { signatureScheme: 'ecdsa' },
+        { accountId: expect.any(String), signatureScheme: 'ecdsa' },
       );
     });
   });
@@ -2228,6 +4021,8 @@ describe('Multisig', () => {
 
       await multisig.createProposal(1, 'AQID', {
         proposalType: 'add_signer',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
         targetThreshold: 1,
         targetSignerCommitments: ['0x' + 'a'.repeat(64)],
         description: '',
@@ -2251,6 +4046,8 @@ describe('Multisig', () => {
           ...mockDelta.delta_payload,
           metadata: {
             proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             description: '',
             target_threshold: 1,
             signer_commitments: ['0x' + 'a'.repeat(64)],
@@ -2305,12 +4102,14 @@ describe('Multisig', () => {
 
       await multisig.createProposal(1, 'AQID', {
         proposalType: 'add_signer',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
         targetThreshold: 1,
         targetSignerCommitments: ['0x' + 'a'.repeat(64)],
         description: '',
       });
 
-      vi.mocked(executeForSummary).mockResolvedValueOnce({
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
         toCommitment: () => ({
           toHex: () => '0x' + 'f'.repeat(64),
         }),
@@ -2344,6 +4143,8 @@ describe('Multisig', () => {
                 signatures: [],
                 metadata: {
                   proposal_type: 'add_signer',
+                  chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+                  salt: MOCK_SALT_HEX,
                   description: '',
                   target_threshold: 1,
                   signer_commitments: [mockSigner.commitment],
@@ -2377,7 +4178,7 @@ describe('Multisig', () => {
 
       const multisig = createTestMultisig(config);
 
-      vi.mocked(executeForSummary).mockResolvedValueOnce({
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
         toCommitment: () => ({
           toHex: () => '0x' + 'f'.repeat(64),
         }),
@@ -2393,6 +4194,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposalType: 'add_signer',
+              chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+              saltHex: MOCK_SALT_HEX,
               targetThreshold: 1,
               targetSignerCommitments: ['0x' + 'a'.repeat(64)],
               description: '',
@@ -2413,7 +4216,7 @@ describe('Multisig', () => {
 
       const multisig = createTestMultisig(config);
 
-      vi.mocked(executeForSummary).mockResolvedValueOnce({
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
         toCommitment: () => ({
           toHex: () => '0x' + 'c'.repeat(64),
         }),
@@ -2428,6 +4231,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposalType: 'add_signer',
+            chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+            saltHex: MOCK_SALT_HEX,
             targetThreshold: 1,
             targetSignerCommitments: ['0x' + 'a'.repeat(64)],
             description: '',
@@ -2437,12 +4242,14 @@ describe('Multisig', () => {
 
       proposal.metadata = {
         proposalType: 'add_signer',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
         targetThreshold: 2,
         targetSignerCommitments: ['0x' + 'a'.repeat(64)],
         description: '',
       };
 
-      vi.mocked(executeForSummary).mockResolvedValueOnce({
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
         toCommitment: () => ({
           toHex: () => '0x' + 'f'.repeat(64),
         }),
@@ -2474,6 +4281,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'add_signer',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               description: '',
               target_threshold: 1,
               signer_commitments: ['0x' + 'a'.repeat(64)],
@@ -2529,6 +4338,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'change_threshold',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               description: '',
               target_threshold: 2,
               signer_commitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
@@ -2579,14 +4390,12 @@ describe('Multisig', () => {
         ok: false,
         status: 404,
         statusText: 'Not Found',
-        // The client reads Retry-After off the error response, so the mock has
-        // to carry headers or it fails before the envelope is ever parsed.
-        headers: { get: () => null },
+        headers: new Headers(),
         // Feature 009: only a conforming { code, message, meta } envelope is
         // folded into the error message; raw text bodies are dropped.
         text: async () =>
           JSON.stringify({
-            code: 'GUARDIAN_PROPOSAL_NOT_FOUND',
+            code: 'proposal_not_found',
             message: 'Proposal not found',
             meta: { retryable: false },
           }),
@@ -2621,6 +4430,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'add_signer' as const,
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           targetThreshold: 1,
           targetSignerCommitments: ['0x' + 'a'.repeat(64)],
           description: '',
@@ -2659,6 +4470,8 @@ describe('Multisig', () => {
           ],
           metadata: {
             proposalType: 'change_threshold',
+            chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+            saltHex: MOCK_SALT_HEX,
             targetThreshold: 1,
             targetSignerCommitments: ['0x' + 'a'.repeat(64)],
             description: '',
@@ -2704,6 +4517,8 @@ describe('Multisig', () => {
             ],
             metadata: {
               proposalType: 'change_threshold',
+              chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+              saltHex: MOCK_SALT_HEX,
               targetThreshold: 1,
               targetSignerCommitments: ['0x' + 'a'.repeat(64)],
               description: '',
@@ -2730,6 +4545,8 @@ describe('Multisig', () => {
         signatures: [],
         metadata: {
           proposalType: 'add_signer' as const,
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           targetThreshold: 2,
           targetSignerCommitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
           description: '',
@@ -2772,6 +4589,8 @@ describe('Multisig', () => {
       const ackPubkey = '0x' + '4'.repeat(66);
       const cosignerSignature = '0x' + '5'.repeat(130);
       const ackSignature = '0x' + '6'.repeat(130);
+      const saltHex = '0x' + '7'.repeat(64);
+      vi.mocked(summarySalt).mockReturnValue({ toHex: () => saltHex } as never);
       const finalRequest = { kind: 'final-change-threshold-request' };
 
       vi.mocked(buildUpdateSignersTransactionRequest)
@@ -2805,8 +4624,10 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'change_threshold',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
           targetThreshold: 1,
           targetSignerCommitments: ['0x' + 'a'.repeat(64)],
+          saltHex,
           description: '',
         },
       });
@@ -2822,6 +4643,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'change_threshold',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               target_threshold: 1,
               signer_commitments: ['0x' + 'a'.repeat(64)],
             },
@@ -2864,21 +4687,139 @@ describe('Multisig', () => {
         expect.anything(),
         expect.anything(),
         expect.anything(),
-        cosignerPubkey,
-        cosignerSignature,
       );
       expect(vi.mocked(buildSignatureAdviceEntry)).toHaveBeenNthCalledWith(
         2,
         expect.anything(),
         expect.anything(),
         expect.anything(),
-        ackPubkey,
-        ackSignature,
       );
+      // The advice payload now comes from the SDK, so the routing assertion is
+      // the commitment each entry is keyed on: cosigner first, GUARDIAN ack
+      // second. Swapping the two entries must not pass.
+      const adviceCalls = vi.mocked(buildSignatureAdviceEntry).mock.calls;
+      expect(adviceCalls[0][0].toHex()).toBe(config.signerCommitments[0]);
+      expect(adviceCalls[1][0].toHex()).toBe(config.guardianCommitment);
+      const executionOptions = vi.mocked(buildUpdateSignersTransactionRequest).mock.calls.at(-1)?.[3];
+      expect(executionOptions?.salt?.toHex()).toBe(saltHex);
       expect(mockWebClient.executeTransaction).not.toHaveBeenCalled();
       expect(mockWebClient.proveTransaction).not.toHaveBeenCalled();
       expect(mockWebClient.submitProvenTransaction).not.toHaveBeenCalled();
       expect(mockWebClient.applyTransaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses to assemble a request whose approval has expired (protocol 0.17)', async () => {
+      const { buildSignatureAdviceEntry, signatureHexToBytes } = await import('./utils/signature.js');
+      vi.mocked(signatureHexToBytes).mockClear();
+      vi.mocked(buildSignatureAdviceEntry).mockClear();
+
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+        guardianPublicKey: '0x' + '1'.repeat(66),
+      };
+
+      const ecdsaSigner: Signer = {
+        ...mockSigner,
+        scheme: 'ecdsa',
+        publicKey: '0x' + '2'.repeat(66),
+      };
+
+      const multisig = createTestMultisig(config, ecdsaSigner);
+      const cachedProposalId = '0x' + 'c'.repeat(64);
+      const requestedProposalId = '0x' + 'C'.repeat(64);
+      const cosignerPubkey = '0x' + '3'.repeat(66);
+      const ackPubkey = '0x' + '4'.repeat(66);
+      const cosignerSignature = '0x' + '5'.repeat(130);
+      const ackSignature = '0x' + '6'.repeat(130);
+      const saltHex = '0x' + '7'.repeat(64);
+      vi.mocked(summarySalt).mockReturnValue({ toHex: () => saltHex } as never);
+      const finalRequest = { kind: 'final-change-threshold-request' };
+      // The summary binds an approval that expired at the current sync height.
+      vi.mocked(summaryApprovalExpirationBlockNum).mockReturnValue(MOCK_ANCHOR_BLOCK_NUM + 10);
+      mockWebClient.getSyncHeight.mockResolvedValue(MOCK_ANCHOR_BLOCK_NUM + 10);
+
+      vi.mocked(buildUpdateSignersTransactionRequest)
+        .mockResolvedValueOnce({
+          request: { kind: 'verify-change-threshold-request' },
+          salt: { toHex: () => '0x' + 'd'.repeat(64) },
+          configHash: { toHex: () => '0x' + 'e'.repeat(64) },
+        } as any)
+        .mockResolvedValueOnce({
+          request: finalRequest,
+          salt: { toHex: () => '0x' + 'd'.repeat(64) },
+          configHash: { toHex: () => '0x' + 'e'.repeat(64) },
+        } as any);
+
+      (multisig as any).proposals.set(cachedProposalId, {
+        id: cachedProposalId,
+        accountId: multisig.accountId,
+        nonce: 1,
+        status: 'ready',
+        txSummary: 'AQID',
+        signatures: [
+          {
+            signerId: '0x' + 'a'.repeat(64),
+            signature: {
+              scheme: 'ecdsa',
+              signature: cosignerSignature,
+              publicKey: cosignerPubkey,
+            },
+            timestamp: '2024-01-01T00:00:00Z',
+          },
+        ],
+        metadata: {
+          proposalType: 'change_threshold',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          targetThreshold: 1,
+          targetSignerCommitments: ['0x' + 'a'.repeat(64)],
+          saltHex,
+          description: '',
+        },
+      });
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          account_id: multisig.accountId,
+          nonce: 1,
+          prev_commitment: '0x' + 'b'.repeat(64),
+          delta_payload: {
+            tx_summary: { data: 'AQID' },
+            signatures: [],
+            metadata: {
+              proposal_type: 'change_threshold',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
+              target_threshold: 1,
+              signer_commitments: ['0x' + 'a'.repeat(64)],
+            },
+          },
+          status: {
+            status: 'pending',
+            timestamp: '2024-01-01T00:00:00Z',
+            proposer_id: '0x' + 'a'.repeat(64),
+            cosigner_sigs: [],
+          },
+        }),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          account_id: multisig.accountId,
+          nonce: 1,
+          ack_sig: ackSignature,
+          ack_pubkey: ackPubkey,
+          ack_scheme: 'ecdsa',
+        }),
+      });
+
+      await expect(
+        multisig.createTransactionProposalRequest(requestedProposalId),
+      ).rejects.toThrow(/approval expired at block/);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockWebClient.executeTransaction).not.toHaveBeenCalled();
     });
 
     it('should return a ready switch_guardian request without executing it', async () => {
@@ -2916,6 +4857,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           newGuardianPubkey,
           newGuardianEndpoint: 'http://new-guardian.com',
           description: '',
@@ -2969,6 +4912,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'add_signer',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               description: '',
               target_threshold: 2,
               signer_commitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
@@ -3011,7 +4956,7 @@ describe('Multisig', () => {
       const multisig = createTestMultisig(config);
       const proposalId = '0x' + 'c'.repeat(64);
 
-      vi.mocked(executeForSummary).mockResolvedValueOnce({
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
         toCommitment: () => ({
           toHex: () => '0x' + 'd'.repeat(64),
         }),
@@ -3032,6 +4977,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'change_threshold',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           targetThreshold: 1,
           targetSignerCommitments: ['0x' + 'a'.repeat(64)],
           description: '',
@@ -3069,6 +5016,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           newGuardianPubkey: '0x' + '1'.repeat(64),
           newGuardianEndpoint: 'http://new-guardian.com',
           description: '',
@@ -3116,6 +5065,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           newGuardianPubkey: '0x' + '1'.repeat(64),
           newGuardianEndpoint: 'http://new-guardian.com',
           description: '',
@@ -3196,6 +5147,8 @@ describe('Multisig', () => {
           ],
           metadata: {
             proposalType: 'change_threshold',
+            chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+            saltHex: MOCK_SALT_HEX,
             targetThreshold: 1,
             targetSignerCommitments: ['0x' + 'a'.repeat(64)],
             description: '',
@@ -3213,6 +5166,8 @@ describe('Multisig', () => {
               signatures: [],
               metadata: {
                 proposal_type: 'change_threshold',
+                chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+                salt: MOCK_SALT_HEX,
                 target_threshold: 1,
                 signer_commitments: ['0x' + 'a'.repeat(64)],
               },
@@ -3287,6 +5242,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           newGuardianPubkey: '0x' + '1'.repeat(64),
           newGuardianEndpoint: 'http://new-guardian.com',
           description: '',
@@ -3300,139 +5257,6 @@ describe('Multisig', () => {
   });
 
   describe('executeProposal', () => {
-    const NEW_GUARDIAN_ENDPOINT = 'http://new-guardian.com';
-    const OLD_GUARDIAN_HOST = 'localhost:3000';
-
-    const switchProposalFixture = (multisig: any, proposalId: string, newGuardianPubkey: string) =>
-      multisig.proposals.set(proposalId, {
-        id: proposalId,
-        accountId: multisig.accountId,
-        nonce: 1,
-        status: 'ready',
-        txSummary: 'AQID',
-        signatures: [
-          {
-            signerId: mockSigner.commitment,
-            signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
-            timestamp: '2024-01-01T00:00:00Z',
-          },
-        ],
-        metadata: {
-          proposalType: 'switch_guardian',
-          newGuardianPubkey,
-          newGuardianEndpoint: NEW_GUARDIAN_ENDPOINT,
-          description: '',
-        },
-      });
-
-    it('executes an offline switch without calling the guardian being replaced', async () => {
-      const multisig = createTestMultisig({
-        threshold: 1,
-        signerCommitments: [mockSigner.commitment],
-        guardianCommitment: '0x' + 'c'.repeat(64),
-      });
-      const proposalId = '0x' + 'c'.repeat(64);
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
-      switchProposalFixture(multisig, proposalId, newGuardianPubkey);
-
-      mockFetch.mockImplementation((url: string) => {
-        if (String(url).includes(OLD_GUARDIAN_HOST)) {
-          throw new Error('the guardian being replaced must not be contacted');
-        }
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            commitment: newGuardianPubkey,
-            success: true,
-            message: 'ok',
-            ack_pubkey: '0x' + 'f'.repeat(64),
-          }),
-        });
-      });
-      mockWebClient.getAccount.mockResolvedValueOnce({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      });
-
-      await expect(multisig.executeProposalOffline(proposalId)).resolves.toBeUndefined();
-
-      const hosts = mockFetch.mock.calls.map(call => String(call[0]));
-      expect(hosts.every(host => !host.includes(OLD_GUARDIAN_HOST))).toBe(true);
-      expect(hosts.some(host => host.includes(NEW_GUARDIAN_ENDPOINT))).toBe(true);
-    });
-
-    it('still switches GUARDIAN when the pre-switch release fails', async () => {
-      const multisig = createTestMultisig({
-        threshold: 1,
-        signerCommitments: [mockSigner.commitment],
-        guardianCommitment: '0x' + 'c'.repeat(64),
-      });
-      const proposalId = '0x' + 'c'.repeat(64);
-      const newGuardianPubkey = '0x' + '9'.repeat(64);
-      switchProposalFixture(multisig, proposalId, newGuardianPubkey);
-
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      mockFetch.mockImplementation((url: string) => {
-        if (String(url).includes(OLD_GUARDIAN_HOST)) {
-          return Promise.reject(new TypeError('Failed to fetch'));
-        }
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            commitment: newGuardianPubkey,
-            success: true,
-            message: 'ok',
-            ack_pubkey: '0x' + 'f'.repeat(64),
-          }),
-        });
-      });
-      mockWebClient.getAccount.mockResolvedValueOnce({
-        serialize: () => new Uint8Array([1, 2, 3]),
-      });
-
-      await expect(multisig.executeProposal(proposalId)).resolves.toBeUndefined();
-
-      const hosts = mockFetch.mock.calls.map(call => String(call[0]));
-      expect(hosts.some(host => host.includes(OLD_GUARDIAN_HOST))).toBe(true);
-      expect(hosts.some(host => host.includes(NEW_GUARDIAN_ENDPOINT))).toBe(true);
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining('pre-switch GUARDIAN'),
-        expect.any(Error),
-      );
-      expect(mockWebClient.submitProvenTransaction).toHaveBeenCalledTimes(1);
-      warn.mockRestore();
-    });
-
-    it('refuses offline execution for a proposal type it does not support', async () => {
-      const multisig = createTestMultisig({
-        threshold: 1,
-        signerCommitments: [mockSigner.commitment],
-        guardianCommitment: '0x' + 'c'.repeat(64),
-      });
-      // Must be a proposal that would otherwise execute: the id matches the
-      // summary commitment and the threshold is met, so only the guard stops it.
-      const proposalId = '0x' + 'c'.repeat(64);
-      (multisig as any).proposals.set(proposalId, {
-        id: proposalId,
-        accountId: multisig.accountId,
-        nonce: 1,
-        status: 'ready',
-        txSummary: 'AQID',
-        signatures: [
-          {
-            signerId: mockSigner.commitment,
-            signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
-            timestamp: '2024-01-01T00:00:00Z',
-          },
-        ],
-        metadata: { proposalType: 'p2id', description: '' },
-      });
-
-      await expect(multisig.executeProposalOffline(proposalId)).rejects.toThrow(
-        'supports switch_guardian only',
-      );
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
     it('should throw if proposal not found locally', async () => {
       const config = {
         threshold: 1,
@@ -3467,6 +5291,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'add_signer',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               description: '',
               target_threshold: 2,
               signer_commitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
@@ -3500,7 +5326,176 @@ describe('Multisig', () => {
       ).rejects.toThrow('not ready for execution');
     });
 
-    it('should fail when GUARDIAN ack signature is missing (selector ON)', async () => {
+    it('rejects a re-fetched tx_summary that is not the one the id was verified against', async () => {
+      // executeProposal re-fetches the summary from GUARDIAN rather than using the one
+      // already bound to the id. It then keys the advice map from it and rebuilds the
+      // request against it, so an unrelated summary served here collects signatures for
+      // one transaction and assembles advice for another. `ensureProposalCommitmentMatchesSummary`
+      // pins the CACHED summary only. On an ECDSA roster the recoverability check would
+      // notice; on a Falcon roster nothing else compares them.
+      const multisig = createTestMultisig({
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      });
+
+      const delta = (txSummaryData: string) => ({
+        account_id: '0x' + 'a'.repeat(30),
+        nonce: 1,
+        prev_commitment: '0x' + 'b'.repeat(64),
+        delta_payload: {
+          tx_summary: { data: txSummaryData },
+          signatures: [],
+          metadata: {
+            proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
+            description: '',
+            target_threshold: 1,
+            signer_commitments: ['0x' + 'a'.repeat(64)],
+          },
+        },
+        status: {
+          status: 'pending',
+          timestamp: '2024-01-01T00:00:00Z',
+          proposer_id: '0x' + 'c'.repeat(64),
+          cosigner_sigs: [
+            {
+              signer_id: '0x' + 'a'.repeat(64),
+              signature: { scheme: 'falcon', signature: '0x' + 'e'.repeat(128) },
+              timestamp: '2024-01-01T00:00:00Z',
+            },
+          ],
+        },
+      });
+
+      // 'AQID' deserializes to the 'c' commitment, which is the proposal id.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [delta('AQID')] }),
+      });
+      await multisig.syncProposals();
+
+      // 'AQIDBA==' deserializes to the 'd' commitment — a different transaction.
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => delta('AQIDBA==') });
+
+      await expect(multisig.executeProposal('0x' + 'c'.repeat(64))).rejects.toThrow(
+        'does not match the proposal id it belongs to'
+      );
+      expect(mockWebClient.executeTransaction).not.toHaveBeenCalled();
+    });
+
+    it.each([['0x'], ['0X'], ['']])(
+      'rejects the salt %p rather than padding it to the zero word',
+      async (saltHex) => {
+        // `normalizeHexWord` left-pads, so a bare prefix becomes the zero word — a salt
+        // nobody chose, which rebuilds a different request and reports itself as a
+        // summary mismatch. GUARDIAN serves this field and the response is cast, not
+        // parsed, so a truthiness test is not enough.
+        const multisig = createTestMultisig({
+          threshold: 1,
+          signerCommitments: ['0x' + 'a'.repeat(64)],
+          guardianCommitment: '0x' + 'c'.repeat(64),
+        });
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            proposals: [
+              {
+                account_id: '0x' + 'a'.repeat(30),
+                nonce: 1,
+                prev_commitment: '0x' + 'b'.repeat(64),
+                delta_payload: {
+                  tx_summary: { data: 'AQID' },
+                  signatures: [],
+                  metadata: {
+                    proposal_type: 'add_signer',
+                    chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+                    salt: saltHex,
+                    description: '',
+                    target_threshold: 1,
+                    signer_commitments: ['0x' + 'a'.repeat(64)],
+                  },
+                },
+                status: {
+                  status: 'pending',
+                  timestamp: '2024-01-01T00:00:00Z',
+                  proposer_id: '0x' + 'c'.repeat(64),
+                  cosigner_sigs: [],
+                },
+              },
+            ],
+          }),
+        });
+
+        const [listed] = await multisig.syncProposals();
+        expect(listed.verification).toMatchObject({
+          status: 'failed',
+          message: expect.stringContaining(saltHex === '' ? 'has no salt' : 'malformed metadata salt'),
+        });
+      },
+    );
+
+    it('refuses to sync a proposal GUARDIAN served without a salt', async () => {
+      // The request declares the salt and miden-client commits
+      // `hash(CONVERSION_INFO || SALT)` into the auth arg, so the summary carries the
+      // commitment and nothing recovers the salt from it. Before the request declared a
+      // salt the auth arg WAS the bare salt, so `summaryAuthArg(summary)` stood in here
+      // correctly; it silently cannot any more. `salt` is optional on the wire, the
+      // server stores the payload opaquely, and GUARDIAN is untrusted -- so a salt-less
+      // proposal is reachable, and must fail by name rather than build a request around
+      // a salt that is really somebody else's commitment.
+      const multisig = createTestMultisig({
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      });
+
+      const saltlessDelta = {
+        account_id: '0x' + 'a'.repeat(30),
+        nonce: 1,
+        prev_commitment: '0x' + 'b'.repeat(64),
+        delta_payload: {
+          tx_summary: { data: 'AQID' },
+          signatures: [],
+          metadata: {
+            proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            description: '',
+            target_threshold: 1,
+            signer_commitments: ['0x' + 'a'.repeat(64)],
+          },
+        },
+        status: {
+          status: 'pending',
+          timestamp: '2024-01-01T00:00:00Z',
+          proposer_id: '0x' + 'c'.repeat(64),
+          cosigner_sigs: [
+            {
+              signer_id: '0x' + 'a'.repeat(64),
+              signature: { scheme: 'falcon', signature: '0x' + 'e'.repeat(128) },
+              timestamp: '2024-01-01T00:00:00Z',
+            },
+          ],
+        },
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ proposals: [saltlessDelta] }),
+      });
+
+      // The binding check rebuilds the request to compare summaries, so it needs the salt;
+      // the listing reports that on the proposal instead of failing (issue #462).
+      const [listed] = await multisig.syncProposals();
+      expect(listed.verification).toMatchObject({
+        status: 'failed',
+        message: expect.stringContaining('has no salt'),
+      });
+    });
+
+    it('should fail when GUARDIAN ack signature is missing', async () => {
       const config = {
         threshold: 1,
         signerCommitments: ['0x' + 'a'.repeat(64)],
@@ -3518,6 +5513,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             description: '',
             target_threshold: 1,
             signer_commitments: ['0x' + 'a'.repeat(64)],
@@ -3610,6 +5607,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'change_threshold',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           targetThreshold: 1,
           targetSignerCommitments: ['0x' + 'a'.repeat(64)],
           description: '',
@@ -3627,6 +5626,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'change_threshold',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               target_threshold: 1,
               signer_commitments: ['0x' + 'a'.repeat(64)],
             },
@@ -3680,17 +5681,19 @@ describe('Multisig', () => {
         expect.anything(),
         expect.anything(),
         expect.anything(),
-        cosignerPubkey,
-        cosignerSignature,
       );
       expect(vi.mocked(buildSignatureAdviceEntry)).toHaveBeenNthCalledWith(
         2,
         expect.anything(),
         expect.anything(),
         expect.anything(),
-        ackPubkey,
-        ackSignature,
       );
+      // The advice payload now comes from the SDK, so the routing assertion is
+      // the commitment each entry is keyed on: cosigner first, GUARDIAN ack
+      // second. Swapping the two entries must not pass.
+      const adviceCalls = vi.mocked(buildSignatureAdviceEntry).mock.calls;
+      expect(adviceCalls[0][0].toHex()).toBe(config.signerCommitments[0]);
+      expect(adviceCalls[1][0].toHex()).toBe(config.guardianCommitment);
     });
 
     it('should execute imported ECDSA proposals with scheme-aware advice', async () => {
@@ -3735,6 +5738,8 @@ describe('Multisig', () => {
           ],
           metadata: {
             proposalType: 'change_threshold',
+            chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+            saltHex: MOCK_SALT_HEX,
             targetThreshold: 1,
             targetSignerCommitments: ['0x' + 'a'.repeat(64)],
             description: '',
@@ -3753,6 +5758,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'change_threshold',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               target_threshold: 1,
               signer_commitments: ['0x' + 'a'.repeat(64)],
             },
@@ -3796,17 +5803,19 @@ describe('Multisig', () => {
         expect.anything(),
         expect.anything(),
         expect.anything(),
-        cosignerPubkey,
-        cosignerSignature,
       );
       expect(vi.mocked(buildSignatureAdviceEntry)).toHaveBeenNthCalledWith(
         2,
         expect.anything(),
         expect.anything(),
         expect.anything(),
-        ackPubkey,
-        ackSignature,
       );
+      // The advice payload now comes from the SDK, so the routing assertion is
+      // the commitment each entry is keyed on: cosigner first, GUARDIAN ack
+      // second. Swapping the two entries must not pass.
+      const adviceCalls = vi.mocked(buildSignatureAdviceEntry).mock.calls;
+      expect(adviceCalls[0][0].toHex()).toBe(config.signerCommitments[0]);
+      expect(adviceCalls[1][0].toHex()).toBe(config.guardianCommitment);
     });
 
     it('should verify switch_guardian endpoint commitment before execution', async () => {
@@ -3835,6 +5844,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           newGuardianPubkey,
           newGuardianEndpoint: 'http://new-guardian.com',
           description: '',
@@ -3845,8 +5856,7 @@ describe('Multisig', () => {
         ok: true,
         json: async () => ({ commitment: newGuardianPubkey }),
       });
-      // Pre-switch canonicalization: getDeltaProposal then pushDelta, both to
-      // the guardian being replaced.
+      // Pre-switch canonicalization push: getDeltaProposal then pushDelta.
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -3858,6 +5868,232 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'switch_guardian',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
+              new_guardian_pubkey: newGuardianPubkey,
+              new_guardian_endpoint: 'http://new-guardian.com',
+            },
+          },
+          status: {
+            status: 'pending',
+            timestamp: '2024-01-01T00:00:00Z',
+            proposer_id: '0x' + 'a'.repeat(64),
+            cosigner_sigs: [],
+          },
+        }),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          account_id: multisig.accountId,
+          nonce: 1,
+          ack_sig: '0x' + '6'.repeat(130),
+          ack_pubkey: '0x' + 'f'.repeat(64),
+          ack_scheme: 'falcon',
+        }),
+      });
+      // #417 pre-switch note import: the old-GUARDIAN proposal listing (no
+      // pending proposals here) runs off the fetch queue via the spy.
+      vi.spyOn(guardian, 'getDeltaProposals').mockResolvedValue([]);
+      mockImportNotesFromProposals.mockReset();
+      mockImportNotesFromProposals.mockResolvedValue([]);
+      mockWebClient.getAccount.mockResolvedValueOnce({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, message: 'ok', ack_pubkey: '0x' + 'f'.repeat(64) }),
+      });
+      await expect(multisig.executeProposal(proposalId)).resolves.toBeUndefined();
+      expect(mockWebClient.executeTransaction).toHaveBeenCalledTimes(1);
+      expect(mockWebClient.proveTransaction).toHaveBeenCalledTimes(1);
+      expect(mockWebClient.submitProvenTransaction).toHaveBeenCalledTimes(1);
+      expect(mockWebClient.applyTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('should still switch GUARDIAN when the pre-switch canonicalization push fails', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+
+      const multisig = createTestMultisig(config);
+      const proposalId = '0x' + 'c'.repeat(64);
+      const newGuardianPubkey = '0x' + '1'.repeat(64);
+
+      (multisig as any).proposals.set(proposalId, {
+        id: proposalId,
+        accountId: multisig.accountId,
+        nonce: 1,
+        status: 'ready',
+        txSummary: 'AQID',
+        signatures: [
+          {
+            signerId: '0x' + 'a'.repeat(64),
+            signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
+            timestamp: '2024-01-01T00:00:00Z',
+          },
+        ],
+        metadata: {
+          proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
+          newGuardianPubkey,
+          newGuardianEndpoint: 'http://new-guardian.com',
+          description: '',
+        },
+      });
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: newGuardianPubkey }),
+      });
+      // getDeltaProposal against the old GUARDIAN fails — must be swallowed.
+      mockFetch.mockRejectedValueOnce(new Error('pre-switch GUARDIAN unreachable'));
+      // #417 pre-switch note import: the old-GUARDIAN proposal listing (no
+      // pending proposals here) runs off the fetch queue via the spy.
+      vi.spyOn(guardian, 'getDeltaProposals').mockResolvedValue([]);
+      mockImportNotesFromProposals.mockReset();
+      mockImportNotesFromProposals.mockResolvedValue([]);
+      mockWebClient.getAccount.mockResolvedValueOnce({
+        serialize: () => new Uint8Array([1, 2, 3]),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, message: 'ok', ack_pubkey: '0x' + 'f'.repeat(64) }),
+      });
+      await expect(multisig.executeProposal(proposalId)).resolves.toBeUndefined();
+      expect(mockWebClient.executeTransaction).toHaveBeenCalledTimes(1);
+      expect(mockWebClient.proveTransaction).toHaveBeenCalledTimes(1);
+      expect(mockWebClient.submitProvenTransaction).toHaveBeenCalledTimes(1);
+      expect(mockWebClient.applyTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('imports notes embedded in pending proposals from the pre-switch GUARDIAN before repointing (#417)', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+
+      const multisig = createTestMultisig(config);
+      const proposalId = '0x' + 'c'.repeat(64);
+      const newGuardianPubkey = '0x' + '1'.repeat(64);
+      const consumeProposalId = '0x' + 'd'.repeat(64);
+      const noteId = '0x' + '9'.repeat(64);
+
+      (multisig as any).proposals.set(proposalId, {
+        id: proposalId,
+        accountId: multisig.accountId,
+        nonce: 1,
+        status: 'ready',
+        txSummary: 'AQID',
+        signatures: [
+          {
+            signerId: '0x' + 'a'.repeat(64),
+            signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
+            timestamp: '2024-01-01T00:00:00Z',
+          },
+        ],
+        metadata: {
+          proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
+          newGuardianPubkey,
+          newGuardianEndpoint: 'http://new-guardian.com',
+          description: '',
+        },
+      });
+
+      // A genuine consume-notes v2 proposal still pending on the old
+      // GUARDIAN at switch time, with a distinct summary ('AQIDBA==', 4
+      // bytes -> the factory mock's 0xdd… commitment) so its computed id
+      // cannot alias the cached switch proposal: it must flow through the
+      // real listing -> metadata parse -> binding re-execution -> import
+      // pipeline.
+      mockNoteDeserialize.mockReturnValue({
+        id: () => ({ toString: () => noteId }),
+      });
+      // The consume binding re-execution must reproduce the consume
+      // proposal's summary commitment.
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
+        toCommitment: () => ({ toHex: () => consumeProposalId }),
+        serialize: () => new Uint8Array([1, 2, 3]),
+      } as never);
+
+      const pendingConsumeDelta = {
+        accountId: multisig.accountId,
+        nonce: 2,
+        prevCommitment: '0x' + 'b'.repeat(64),
+        deltaPayload: {
+          txSummary: { data: 'AQIDBA==' },
+          signatures: [],
+          metadata: {
+            proposalType: 'consume_notes',
+            consumeNotesMetadataVersion: 2,
+            noteIds: [noteId],
+            consumeNotesNotes: ['bm90ZQ=='],
+            chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+            saltHex: MOCK_SALT_HEX,
+            salt: MOCK_SALT_HEX,
+            description: '',
+          },
+        },
+        status: {
+          status: 'pending',
+          timestamp: '2024-01-01T00:00:00Z',
+          proposerId: '0x' + 'a'.repeat(64),
+          cosignerSigs: [],
+        },
+      };
+      const listingSpy = vi
+        .spyOn(guardian, 'getDeltaProposals')
+        .mockResolvedValue([pendingConsumeDelta as never]);
+
+      const events: string[] = [];
+      mockImportNotesFromProposals.mockReset();
+      mockImportNotesFromProposals.mockImplementation(async () => {
+        events.push('import');
+        return [
+          {
+            identifier: noteId,
+            source: 'proposal',
+            status: 'imported',
+            retryable: false,
+          },
+          // A per-note failure at this point is a permanent loss (the old
+          // GUARDIAN is about to be left behind), so it must be warned even
+          // though it is not a step-level problem.
+          {
+            identifier: '0x' + '8'.repeat(64),
+            source: 'proposal',
+            status: 'failed',
+            retryable: true,
+            reason: 'node RPC hiccup fetching the inclusion proof',
+          },
+        ];
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ commitment: newGuardianPubkey }),
+      });
+      // Pre-switch canonicalization push: getDeltaProposal then pushDelta.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          account_id: multisig.accountId,
+          nonce: 1,
+          prev_commitment: '0x' + 'b'.repeat(64),
+          delta_payload: {
+            tx_summary: { data: 'AQID' },
+            signatures: [],
+            metadata: {
+              proposal_type: 'switch_guardian',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               new_guardian_pubkey: newGuardianPubkey,
               new_guardian_endpoint: 'http://new-guardian.com',
             },
@@ -3883,19 +6119,128 @@ describe('Multisig', () => {
       mockWebClient.getAccount.mockResolvedValueOnce({
         serialize: () => new Uint8Array([1, 2, 3]),
       });
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, message: 'ok', ack_pubkey: '0x' + 'f'.repeat(64) }),
+      // The switch transaction submit — the import must precede it, because
+      // summary-binding re-verification only reproduces before the account
+      // state advances.
+      mockWebClient.submitProvenTransaction.mockImplementationOnce(async () => {
+        events.push('execute');
+        return undefined;
       });
-      await expect(multisig.executeProposal(proposalId)).resolves.toBeUndefined();
+      // Registration on the new GUARDIAN — must happen after the import.
+      mockFetch.mockImplementationOnce(async () => {
+        events.push('register');
+        return {
+          ok: true,
+          json: async () => ({ success: true, message: 'ok', ack_pubkey: '0x' + 'f'.repeat(64) }),
+        };
+      });
 
-      const hosts = mockFetch.mock.calls.map(call => String(call[0]));
-      expect(hosts.some(host => host.includes('localhost:3000'))).toBe(true);
-      expect(hosts.some(host => host.includes('new-guardian.com'))).toBe(true);
-      expect(mockWebClient.executeTransaction).toHaveBeenCalledTimes(1);
-      expect(mockWebClient.proveTransaction).toHaveBeenCalledTimes(1);
-      expect(mockWebClient.submitProvenTransaction).toHaveBeenCalledTimes(1);
-      expect(mockWebClient.applyTransaction).toHaveBeenCalledTimes(1);
+      try {
+        await expect(multisig.executeProposal(proposalId)).resolves.toBeUndefined();
+
+        // The listing ran against the OLD guardian client (this instance is
+        // replaced by the repoint), and the consume-notes proposal flowed
+        // through metadata parsing and binding verification into the import.
+        expect(listingSpy).toHaveBeenCalledWith(multisig.accountId);
+        expect(mockImportNotesFromProposals).toHaveBeenCalledTimes(1);
+        expect(mockImportNotesFromProposals).toHaveBeenCalledWith(
+          mockWebClient,
+          [
+            expect.objectContaining({
+              id: consumeProposalId,
+              nonce: 2,
+              metadata: expect.objectContaining({
+                proposalType: 'consume_notes',
+                metadataVersion: 2,
+                noteIds: [noteId],
+              }),
+            }),
+          ],
+          expect.objectContaining({ midenRpcEndpoint: MIDEN_RPC_ENDPOINT }),
+        );
+        // The embedded notes were in the local store before the switch
+        // transaction executed, and long before the client repointed and
+        // registered on the new GUARDIAN.
+        expect(events).toEqual(['import', 'execute', 'register']);
+        // The per-note failure was surfaced — it is the last moment the note
+        // is reachable, so it must not disappear into the discarded report.
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`could not preserve embedded note ${'0x' + '8'.repeat(64)}`),
+          'node RPC hiccup fetching the inclusion proof',
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('should still switch GUARDIAN when the pre-switch note import cannot run (#417)', async () => {
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+
+      const multisig = createTestMultisig(config);
+      const proposalId = '0x' + 'c'.repeat(64);
+      const newGuardianPubkey = '0x' + '1'.repeat(64);
+
+      (multisig as any).proposals.set(proposalId, {
+        id: proposalId,
+        accountId: multisig.accountId,
+        nonce: 1,
+        status: 'ready',
+        txSummary: 'AQID',
+        signatures: [
+          {
+            signerId: '0x' + 'a'.repeat(64),
+            signature: { scheme: 'falcon', signature: '0x' + 'b'.repeat(128) },
+            timestamp: '2024-01-01T00:00:00Z',
+          },
+        ],
+        metadata: {
+          proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
+          newGuardianPubkey,
+          newGuardianEndpoint: 'http://new-guardian.com',
+          description: '',
+        },
+      });
+
+      // The old GUARDIAN cannot list pending proposals — the import step must
+      // fold into a warning, never block the switch.
+      vi.spyOn(guardian, 'getDeltaProposals').mockRejectedValue(
+        new Error('old GUARDIAN listing failed'),
+      );
+      mockImportNotesFromProposals.mockReset();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      try {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ commitment: newGuardianPubkey }),
+        });
+        // getDeltaProposal against the old GUARDIAN fails — must be swallowed.
+        mockFetch.mockRejectedValueOnce(new Error('pre-switch GUARDIAN unreachable'));
+        mockWebClient.getAccount.mockResolvedValueOnce({
+          serialize: () => new Uint8Array([1, 2, 3]),
+        });
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: true, message: 'ok', ack_pubkey: '0x' + 'f'.repeat(64) }),
+        });
+
+        await expect(multisig.executeProposal(proposalId)).resolves.toBeUndefined();
+
+        expect(mockImportNotesFromProposals).not.toHaveBeenCalled();
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("Pre-switch proposal-note import step 'proposal-import'"),
+          expect.anything(),
+        );
+        expect(mockWebClient.submitProvenTransaction).toHaveBeenCalledTimes(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
 
     it('should reject switch_guardian execution when endpoint commitment mismatches', async () => {
@@ -3923,6 +6268,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           newGuardianPubkey: '0x' + '1'.repeat(64),
           newGuardianEndpoint: 'http://new-guardian.com',
           description: '',
@@ -3970,6 +6317,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           newGuardianPubkey: '0x' + '1'.repeat(64),
           newGuardianEndpoint: 'http://new-guardian.com',
           description: '',
@@ -4022,6 +6371,8 @@ describe('Multisig', () => {
         ],
         metadata: {
           proposalType: 'switch_guardian',
+          chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+          saltHex: MOCK_SALT_HEX,
           newGuardianPubkey: '0x' + '1'.repeat(64),
           newGuardianEndpoint: 'http://new-guardian.com',
           description: '',
@@ -4031,6 +6382,71 @@ describe('Multisig', () => {
       await expect(multisig.executeProposal(proposalId)).rejects.toThrow(
         'Duplicate advice-map key detected',
       );
+    });
+  });
+
+  describe('preservePreSwitchProposalNotes (#417)', () => {
+    const config = {
+      threshold: 1,
+      signerCommitments: ['0x' + 'a'.repeat(64)],
+      guardianCommitment: '0x' + 'c'.repeat(64),
+    };
+
+    it('returns the recovery report on success (mirror of the Rust Option<NoteRecoveryReport>)', async () => {
+      const multisig = createTestMultisig(config);
+      vi.spyOn(guardian, 'getDeltaProposals').mockResolvedValue([]);
+      mockImportNotesFromProposals.mockReset();
+      mockImportNotesFromProposals.mockResolvedValue([]);
+
+      const report = await multisig.preservePreSwitchProposalNotes();
+
+      expect(report).toBeDefined();
+      expect(report?.proposalImport).toEqual([]);
+      expect(report?.problems).toEqual([]);
+      // The switch slice never runs the other strategies or the sync.
+      expect(report?.transport).toBeUndefined();
+      expect(report?.backfill).toBeUndefined();
+      expect(report?.synced).toBe(false);
+    });
+
+    it('cancels the flow on timeout: returns undefined and does no work after the deadline', async () => {
+      const multisig = createTestMultisig(config);
+
+      // A listing that hangs past the deadline, releasable later to prove
+      // the cancellation token stops the resumed flow at its next
+      // checkpoint instead of letting it import against the shared client.
+      let releaseListing!: (deltas: never[]) => void;
+      vi.spyOn(guardian, 'getDeltaProposals').mockReturnValue(
+        new Promise<never[]>((resolve) => {
+          releaseListing = resolve;
+        }) as never,
+      );
+      mockImportNotesFromProposals.mockReset();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.useFakeTimers();
+
+      try {
+        const pending = multisig.preservePreSwitchProposalNotes();
+        // 30s deadline, then the bounded settle grace for the hung listing.
+        await vi.advanceTimersByTimeAsync(30_000);
+        await vi.advanceTimersByTimeAsync(5_000);
+        const report = await pending;
+
+        expect(report).toBeUndefined();
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('timed out after 30000ms and was cancelled'),
+        );
+
+        // The hung listing resolving later must not restart work: with the
+        // token set, the flow throws at the post-listing checkpoint and the
+        // import never runs.
+        releaseListing([]);
+        await vi.runAllTimersAsync();
+        expect(mockImportNotesFromProposals).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+        vi.useRealTimers();
+      }
     });
   });
 
@@ -4057,9 +6473,34 @@ describe('Multisig', () => {
         .mockRejectedValueOnce(transient)
         .mockResolvedValueOnce({});
 
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          account_id: '0x' + 'a'.repeat(30),
+          nonce: 1,
+          prev_commitment: '0x' + 'b'.repeat(64),
+          delta_payload: {
+            tx_summary: { data: 'AQID' },
+            signatures: [],
+            metadata: {
+              proposal_type: 'b2agg',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
+              description: '',
+            },
+          },
+          status: {
+            status: 'pending',
+            timestamp: '2024-01-01T00:00:00Z',
+            proposer_id: '0x' + 'c'.repeat(64),
+            cosigner_sigs: [],
+          },
+        }),
+      });
+
       vi.useFakeTimers();
       try {
-        const submission = multisig.submitTransaction({} as never);
+        const submission = multisig.submitTransaction('0x' + 'c'.repeat(64), {} as never);
         await vi.runAllTimersAsync();
         await submission;
       } finally {
@@ -4089,6 +6530,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: proposalType,
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             description: '',
           },
         },
@@ -4122,6 +6565,7 @@ describe('Multisig', () => {
       };
       builtinDelta.delta_payload.metadata = {
         proposal_type: 'change_threshold',
+        chain_anchor: MOCK_CHAIN_ANCHOR_B64,
         description: '',
         target_threshold: 1,
         signer_commitments: ['0x' + 'a'.repeat(64)],
@@ -4165,7 +6609,7 @@ describe('Multisig', () => {
 
       // Signed commitment comes from TransactionSummary.deserialize -> 'c' * 64.
       // Make the binding request derive a different commitment so the check fails.
-      vi.mocked(executeForSummary).mockResolvedValueOnce({
+      vi.mocked(executeForSummaryAt).mockResolvedValueOnce({
         toCommitment: () => ({
           toHex: () => '0x' + '9'.repeat(64),
         }),
@@ -4229,6 +6673,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             target_threshold: 2,
             signer_commitments: ['0x1', '0x2'],
           },
@@ -4251,6 +6697,8 @@ describe('Multisig', () => {
 
       const proposal = await multisig.createProposal(1, 'AQID', {
         proposalType: 'add_signer',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
         targetThreshold: 2,
         targetSignerCommitments: ['0x1', '0x2'],
         description: '',
@@ -4292,6 +6740,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'p2id',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               recipient_id: '0xrecipient',
               faucet_id: '0xfaucet',
               amount: '100',
@@ -4337,6 +6787,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             target_threshold: 2,
             signer_commitments: ['0x1', '0x2'],
             description: '',
@@ -4360,11 +6812,87 @@ describe('Multisig', () => {
 
       const proposal = await multisig.createProposal(1, 'AQID', {
         proposalType: 'consume_notes',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
         noteIds: ['0xnote1', '0xnote2'],
         description: '',
       });
 
       expect(proposal.metadata?.proposalType).toBe('consume_notes');
+    });
+
+    /// Issue #409: the proposer authenticates the notes BEFORE the summary
+    /// (and its anchor) is captured, so the signed summary is the one every
+    /// cosigner's authenticated rebuild reproduces.
+    it('authenticates the notes before capturing the consume_notes summary (issue #409)', async () => {
+      const { executeForSummary } = await import('./transaction.js');
+      const config = {
+        threshold: 1,
+        signerCommitments: ['0x' + 'a'.repeat(64)],
+        guardianCommitment: '0x' + 'c'.repeat(64),
+      };
+      const multisig = createTestMultisig(config);
+      const noteId = '0x' + '88'.repeat(32);
+      const note = { id: () => ({ toString: () => noteId }), serialize: () => new Uint8Array([9]) };
+      mockWebClient.getInputNote = vi.fn().mockResolvedValue({ toNote: () => note });
+      // The returned delta's embedded bytes decode back to the same note.
+      mockNoteDeserialize.mockReturnValue(note);
+
+      const order: string[] = [];
+      mockEnsureNotesAuthenticated.mockClear();
+      mockEnsureNotesAuthenticated.mockImplementationOnce(async () => {
+        order.push('authenticate');
+      });
+      vi.mocked(executeForSummary).mockImplementationOnce(async () => {
+        order.push('summary');
+        return {
+          summary: {
+            toCommitment: () => ({ toHex: () => '0x' + 'c'.repeat(64) }),
+            serialize: () => new Uint8Array([1, 2, 3]),
+          },
+          anchor: createMockChainAnchor(),
+        } as never;
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          delta: {
+            account_id: '0x' + 'a'.repeat(30),
+            nonce: 1,
+            prev_commitment: '0x' + 'b'.repeat(64),
+            delta_payload: {
+              tx_summary: { data: 'AQID' },
+              signatures: [],
+              metadata: {
+                proposal_type: 'consume_notes',
+                consume_notes_metadata_version: 2,
+                note_ids: [noteId],
+                consume_notes_notes: ['CQ=='],
+                chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+                salt: MOCK_SALT_HEX,
+                description: '',
+              },
+            },
+            status: {
+              status: 'pending',
+              timestamp: '2024-01-01T00:00:00Z',
+              proposer_id: '0x' + 'c'.repeat(64),
+              cosigner_sigs: [],
+            },
+          },
+          commitment: '0x' + 'c'.repeat(64),
+        }),
+      });
+
+      await multisig.createConsumeNotesProposal([noteId], { nonce: 1 });
+
+      // Called before the summary; the post-push binding check of the served
+      // proposal calls it again (a no-op once the notes are authenticated).
+      expect(mockEnsureNotesAuthenticated).toHaveBeenCalled();
+      expect((mockEnsureNotesAuthenticated.mock.calls[0] as unknown as [unknown, unknown[]])[1]).toEqual([
+        note,
+      ]);
+      expect(order).toEqual(['authenticate', 'summary']);
     });
 
     it('should create p2id proposal', async () => {
@@ -4385,6 +6913,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposal_type: 'add_signer',
+            chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+            salt: MOCK_SALT_HEX,
             target_threshold: 1,
             signer_commitments: ['0x' + 'a'.repeat(64)],
             description: '',
@@ -4408,6 +6938,8 @@ describe('Multisig', () => {
 
       const proposal = await multisig.createProposal(1, 'AQID', {
         proposalType: 'p2id',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
         recipientId: '0xrecipient',
         faucetId: '0xfaucet',
         amount: '100',
@@ -4435,6 +6967,8 @@ describe('Multisig', () => {
           signatures: [],
           metadata: {
             proposalType: 'add_signer',
+            chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+            saltHex: MOCK_SALT_HEX,
             targetThreshold: 2,
             targetSignerCommitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
             description: '',
@@ -4458,6 +6992,8 @@ describe('Multisig', () => {
 
       const proposal = await multisig.createProposal(1, 'AQID', {
         proposalType: 'switch_guardian',
+        chainAnchor: MOCK_CHAIN_ANCHOR_B64,
+        saltHex: MOCK_SALT_HEX,
         newGuardianPubkey: '0xnewpubkey',
         newGuardianEndpoint: 'http://new-guardian.com',
         description: '',
@@ -4488,6 +7024,8 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'add_signer',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               target_threshold: 2,
               signer_commitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
               description: '',
@@ -4524,6 +7062,8 @@ describe('Multisig', () => {
             ...mockProposalsPending[0].delta_payload,
             metadata: {
               proposal_type: 'add_signer',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
+              salt: MOCK_SALT_HEX,
               target_threshold: 2,
               signer_commitments: ['0x' + 'a'.repeat(64), '0x' + 'b'.repeat(64)],
               description: '',
@@ -4628,9 +7168,10 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'change_threshold',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
               target_threshold: 3,
               signer_commitments: ['0xa', '0xb', '0xc'],
-              salt: '0xlegacysalt',
+              salt: MOCK_SALT_HEX,
             },
           },
           status: {
@@ -4678,10 +7219,11 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'p2id',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
               recipient_id: '0xrecipient',
               faucet_id: '0xfaucet',
               amount: '12345',
-              salt: '0xsalt',
+              salt: MOCK_SALT_HEX,
             },
           },
           status: {
@@ -4734,9 +7276,10 @@ describe('Multisig', () => {
             signatures: [],
             metadata: {
               proposal_type: 'switch_guardian',
+              chain_anchor: MOCK_CHAIN_ANCHOR_B64,
               new_guardian_pubkey: '0xnewpubkey',
               new_guardian_endpoint: 'http://new-guardian.com',
-              salt: '0xsalt',
+              salt: MOCK_SALT_HEX,
             },
           },
           status: {

@@ -11,13 +11,12 @@
  * human-readable encoding and should not be copied into this table.
  */
 export const PROCEDURE_ROOTS = {
-  update_signers: '0x3d382ad461f9914c487c6fe908991d088eb54ecbd4aa8560ef79c66c3746bf19',
-  update_procedure_threshold: '0x1f43e9d56ceff5d547ffdcb89896fb38cae0be1b74d9235ed2b4aa525df85f8d',
-  auth_tx: '0x58156720b5dba3490a008a733e9f414363b4fb367bfdf36c324f3c2867372484',
-  update_guardian: '0xc8ea876f1837e5cd1d6031becdbd40ce262ecd55930d65400f6890a37149d80c',
-  verify_guardian: '0x9bc6e7b25c8dbaa29d6ad41e354a545dd0a4bac7f3a521bb5195ba101f0213cc',
-  send_asset: '0x6d30df4312a2c44ec842db1bee227cc045396ca91e2c47d756dcb607f2bf5f89',
-  receive_asset: '0x75f638c65584d058542bcf4674b066ae394183021bc9b44dc2fdd97d52f9bcfb',
+  update_signers: '0xe39b380d435dd42206fd625fcddfd26a379a2312cfef0271e9b5f18cbdec67e5',
+  update_procedure_threshold: '0x5de3563f30c5dd130da49c8fdd86d867fed6dbbd928363021c53ef99d8034bac',
+  auth_tx: '0x4989b90cb5b605195fcf702903fa1c8b3eab9d5c6ccb2ed4a81b345069a36671',
+  update_guardian: '0x93dedb135fd5bb7112c07aacf4a5680ddc76e45ecf043bfc42ea735b6d971911',
+  send_asset: '0x936e9920bffd7f458cc9ba2c4bbcc018fc4d3561511d79635955129268039dd7',
+  receive_asset: '0xd7416b798a70aabbca510c3cd0f48ba35473b5d76dc302375157c6f563fffc15',
 } as const;
 
 /**
@@ -34,7 +33,7 @@ export type ProcedureName = keyof typeof PROCEDURE_ROOTS;
  * @example
  * ```typescript
  * const root = getProcedureRoot('send_asset');
- * // '0x6d30df4312a2c44ec842db1bee227cc045396ca91e2c47d756dcb607f2bf5f89'
+ * // '0x936e9920bffd7f458cc9ba2c4bbcc018fc4d3561511d79635955129268039dd7'
  * ```
  */
 export function getProcedureRoot(name: ProcedureName): string {

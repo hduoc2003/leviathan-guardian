@@ -1,13 +1,15 @@
 //! Unified proposal management - all proposal operations in one place.
 
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::pin::Pin;
 
 use miden_client::Serializable;
 use miden_multisig_client::{
     build_p2id_transaction_request, build_transfer_asset, ensure_hex_prefix, generate_salt,
-    word_from_hex, Asset, ExportedProposal, NoteId, ProcedureName, TransactionType,
+    word_from_hex, Asset, ExportedProposal, NoteId, P2ideHeights, ProcedureName, Proposal,
+    ProposalVerification, TransactionType,
 };
 use miden_protocol::account::AccountId;
 use miden_protocol::address::NetworkId;
@@ -16,7 +18,7 @@ use rustyline::DefaultEditor;
 
 use crate::display::{
     print_error, print_full_hex, print_info, print_section, print_success, print_waiting,
-    shorten_hex,
+    print_warning, shorten_hex,
 };
 use crate::menu::prompt_input;
 use crate::state::{CustomProposalRecipe, SessionState};
@@ -149,6 +151,11 @@ async fn action_create_proposal(
         _ => return Err("Invalid choice".to_string()),
     };
 
+    if !confirm_override_dilution(state, &transaction_type, editor)? {
+        print_info("Proposal cancelled.");
+        return Ok(());
+    }
+
     print_waiting("Creating proposal on GUARDIAN");
 
     // Try to create proposal with retry for non-canonical delta pending errors
@@ -238,7 +245,7 @@ async fn create_proposal_with_retry(
     state: &mut SessionState,
     transaction_type: TransactionType,
     _editor: &mut DefaultEditor,
-) -> Result<miden_multisig_client::Proposal, String> {
+) -> Result<Proposal, String> {
     let mut last_error = String::new();
     let mut commitment_mismatch_retried = false;
 
@@ -356,6 +363,7 @@ async fn action_view_proposals(state: &mut SessionState) -> Result<(), String> {
         println!("      Type: {:?}", proposal.transaction_type);
         print_full_hex("      Proposal ID", &proposal.id);
         println!("      Signatures: {}/{}", collected, required);
+        print_verification(proposal);
 
         if proposal.status.is_pending() && !proposal.metadata.signers.is_empty() {
             println!("      Signers:");
@@ -400,6 +408,7 @@ async fn action_sign_proposal(
         println!("  [{}] {}", idx + 1, shorten_hex(&proposal.id));
         println!("      Type: {:?}", proposal.transaction_type);
         println!("      Signatures: {}/{}", collected, required);
+        print_verification(proposal);
     }
 
     let selection = prompt_input(editor, "\nSelect proposal to sign (number): ")?;
@@ -437,7 +446,7 @@ async fn action_sign_proposal(
     let (collected, required) = updated.signature_counts();
     print_info(&format!("Signatures: {}/{}", collected, required));
 
-    if updated.signatures_needed() == 0 {
+    if updated.is_actionable() {
         print_success("All signatures collected! Ready to execute with [4].");
     }
 
@@ -471,7 +480,7 @@ async fn action_execute_proposal(
     println!("\nPending Proposals:");
     for (idx, proposal) in proposals.iter().enumerate() {
         let (collected, required) = proposal.signature_counts();
-        let ready = if proposal.signatures_needed() == 0 {
+        let ready = if proposal.is_actionable() {
             " ✓ READY"
         } else {
             ""
@@ -480,6 +489,7 @@ async fn action_execute_proposal(
         println!("  [{}] {}{}", idx + 1, shorten_hex(&proposal.id), ready);
         println!("      Type: {:?}", proposal.transaction_type);
         println!("      Signatures: {}/{}", collected, required);
+        print_verification(proposal);
     }
 
     let selection = prompt_input(editor, "\nSelect proposal to execute (number): ")?;
@@ -685,6 +695,7 @@ async fn action_export_proposal(
         println!("  [{}] {}", idx + 1, shorten_hex(&proposal.id));
         println!("      Type: {:?}", proposal.transaction_type);
         println!("      Signatures: {}/{}", collected, required);
+        print_verification(proposal);
     }
 
     let choice = prompt_input(editor, "\nSelect proposal to export (number): ")?;
@@ -1024,31 +1035,41 @@ async fn action_create_custom_proposal(
     }
 
     print_info("Building a transfer transaction to use as the custom transaction request.");
-    let (recipient, faucet_id, amount, note_type) = match prompt_p2id(state, editor)? {
+    let (recipient, faucet_id, amount, note_type, heights) = match prompt_p2id(state, editor)? {
         TransactionType::P2ID {
             recipient,
             faucet_id,
             amount,
             note_type,
-        } => (recipient, faucet_id, amount, note_type),
+            heights,
+        } => (recipient, faucet_id, amount, note_type, heights),
         _ => return Err("expected a P2ID transaction".to_string()),
     };
 
     let client = state.get_client_mut()?;
+    client
+        .sync()
+        .await
+        .map_err(|e| format!("failed to sync before building the custom proposal: {}", e))?;
     let account = client
         .account()
         .ok_or_else(|| "No account loaded".to_string())?
         .clone();
 
-    let asset = build_transfer_asset(account.inner(), faucet_id, amount)
-        .map_err(|e| format!("invalid asset: {}", e))?;
+    let asset =
+        build_transfer_asset(faucet_id, amount).map_err(|e| format!("invalid asset: {}", e))?;
     let salt = generate_salt();
+    let auth_args = client
+        .multisig_auth_args(salt, None, None)
+        .await
+        .map_err(|e| format!("failed to build the multisig auth args: {}", e))?;
     let transaction_request_bytes = build_p2id_transaction_request(
         account.inner(),
         recipient,
         vec![asset.into()],
         note_type,
-        salt,
+        heights,
+        &auth_args,
         std::iter::empty(),
     )
     .map_err(|e| format!("failed to build transaction: {}", e))?
@@ -1060,9 +1081,14 @@ async fn action_create_custom_proposal(
         .await
         .map_err(|e| format!("propose_custom_transaction failed: {}", e))?;
     let proposal_id = proposal.id.clone();
+    let bound_block_num = proposal
+        .metadata
+        .chain_anchor()
+        .map_err(|e| format!("proposal carries no usable chain anchor: {}", e))?
+        .block_num();
 
-    // The integration owns its recipe (build inputs + salt), not the serialized
-    // transaction; [8] rebuilds the request deterministically from these.
+    // The integration owns its recipe (build inputs + salt + bound block), not the
+    // serialized transaction; [8] rebuilds the request deterministically from these.
     state.cache_custom_recipe(
         &proposal_id,
         CustomProposalRecipe {
@@ -1070,7 +1096,9 @@ async fn action_create_custom_proposal(
             faucet_id,
             amount,
             note_type,
+            heights,
             salt,
+            bound_block_num,
         },
     );
 
@@ -1105,15 +1133,21 @@ async fn action_execute_custom_proposal(
         .account()
         .ok_or_else(|| "No account loaded".to_string())?
         .clone();
-    let asset = build_transfer_asset(account.inner(), recipe.faucet_id, recipe.amount)
+    let asset = build_transfer_asset(recipe.faucet_id, recipe.amount)
         .map_err(|e| format!("invalid asset: {}", e))?;
 
+    let auth_args = state
+        .get_client()?
+        .multisig_auth_args(recipe.salt, Some(recipe.bound_block_num), None)
+        .await
+        .map_err(|e| format!("failed to rebuild the multisig auth args: {}", e))?;
     let mut request = build_p2id_transaction_request(
         account.inner(),
         recipe.recipient,
         vec![asset.into()],
         recipe.note_type,
-        recipe.salt,
+        recipe.heights,
+        &auth_args,
         std::iter::empty(),
     )
     .map_err(|e| format!("failed to rebuild transaction: {}", e))?;
@@ -1129,12 +1163,52 @@ async fn action_execute_custom_proposal(
 
     print_waiting("Submitting custom transaction");
     client
-        .submit_transaction(request)
+        .submit_transaction(&proposal_id, request)
         .await
         .map_err(|e| format!("submit failed: {}", e))?;
 
     print_success("Custom proposal executed");
     Ok(())
+}
+
+/// Surfaces the upstream `AuthMultisig` security note before a signer-set-growing
+/// proposal: per-procedure threshold overrides are absolute counts and the on-chain
+/// update never re-scales them, so growth silently lowers every override's
+/// effective signing ratio. Returns whether the user chose to proceed.
+fn confirm_override_dilution(
+    state: &SessionState,
+    transaction_type: &TransactionType,
+    editor: &mut DefaultEditor,
+) -> Result<bool, String> {
+    let client = state.get_client()?;
+    let account = client
+        .account()
+        .ok_or_else(|| "No account loaded".to_string())?;
+    let current = account.cosigner_commitments().len() as u32;
+    let Some(target) = transaction_type.target_signer_count(current) else {
+        return Ok(true);
+    };
+    let diluted = account
+        .overrides_diluted_by_signer_growth(target)
+        .map_err(|e| format!("Failed to read procedure threshold overrides: {}", e))?;
+    if diluted.is_empty() {
+        return Ok(true);
+    }
+
+    print_warning("Growing the signer set dilutes existing procedure threshold overrides.");
+    print_info("Overrides are absolute signature counts and are never re-scaled on-chain:");
+    for (procedure, threshold) in &diluted {
+        println!(
+            "    {}: {}-of-{} becomes {}-of-{}",
+            procedure, threshold, current, threshold, target
+        );
+    }
+    print_info(
+        "To keep the intended security level, raise the affected overrides via\n  \
+         [6] Update procedure threshold override after (or alongside) this change.",
+    );
+    let answer = prompt_input(editor, "Proceed anyway? [y/N]: ")?;
+    Ok(matches!(answer.trim(), "y" | "Y"))
 }
 
 fn prompt_add_cosigner(editor: &mut DefaultEditor) -> Result<TransactionType, String> {
@@ -1181,23 +1255,20 @@ fn prompt_remove_cosigner(
     Ok(TransactionType::remove_cosigner(commitment))
 }
 
-/// Parses an account address from either a `0x` hex account ID or a bech32m
-/// address (e.g. `mdev1...`). Miden 0.15 uses bech32m as the canonical
-/// user-facing address format, so faucets and other tools emit that form.
+/// Parses an account address as a `0x` hex account ID or a bech32m address
+/// (e.g. `mdev1...`), the form faucets and explorers show. A bech32m address
+/// names its network, which has to be the session's.
 fn parse_account_address(input: &str, expected_network: &NetworkId) -> Result<AccountId, String> {
-    if input.starts_with("0x") || input.starts_with("0X") {
-        AccountId::from_hex(input).map_err(|e| e.to_string())
-    } else {
-        let (network_id, account_id) = AccountId::from_bech32(input).map_err(|e| e.to_string())?;
-        if &network_id != expected_network {
-            return Err(format!(
-                "address belongs to the {} network but the session is configured for {}",
-                network_id.as_str(),
-                expected_network.as_str()
-            ));
-        }
-        Ok(account_id)
+    let (network_id, account_id) =
+        miden_multisig_client::parse_account_address(input).map_err(|e| e.to_string())?;
+    if let Some(network_id) = network_id.filter(|network_id| network_id != expected_network) {
+        return Err(format!(
+            "address belongs to the {} network but the session is configured for {}",
+            network_id.as_str(),
+            expected_network.as_str()
+        ));
     }
+    Ok(account_id)
 }
 
 fn prompt_p2id(
@@ -1221,11 +1292,11 @@ fn prompt_p2id(
 
     // Show available assets
     println!("\nAvailable assets in vault:");
-    let mut fungible_assets: Vec<(usize, &miden_protocol::asset::FungibleAsset)> = Vec::new();
+    let mut fungible_assets: Vec<(usize, miden_protocol::asset::FungibleAsset)> = Vec::new();
 
     for (i, asset) in assets.iter().enumerate() {
-        match asset {
-            Asset::Fungible(fungible) => {
+        match asset.as_fungible() {
+            Some(fungible) => {
                 println!(
                     "  [{}] {} tokens (faucet: {})",
                     i + 1,
@@ -1234,11 +1305,11 @@ fn prompt_p2id(
                 );
                 fungible_assets.push((i + 1, fungible));
             }
-            Asset::NonFungible(nft) => {
+            None => {
                 println!(
                     "  [{}] NFT (faucet: {}) - NOT SUPPORTED for P2ID",
                     i + 1,
-                    shorten_hex(&nft.faucet_id().to_hex())
+                    shorten_hex(&asset.faucet_id().to_hex())
                 );
             }
         }
@@ -1261,7 +1332,7 @@ fn prompt_p2id(
         .ok_or_else(|| "Invalid selection".to_string())?;
 
     let faucet_id = selected_asset.faucet_id();
-    let max_amount = selected_asset.amount();
+    let max_amount = selected_asset.amount().as_u64();
 
     println!(
         "\nSelected: {} tokens from faucet {}",
@@ -1305,20 +1376,50 @@ fn prompt_p2id(
         other => return Err(format!("Invalid note visibility '{}'", other)),
     };
 
+    // Get optional P2IDE heights (issue #366)
+    let heights = P2ideHeights {
+        reclaim: prompt_p2ide_height(editor, "  Reclaim block height (blank = none): ")?,
+        timelock: prompt_p2ide_height(editor, "  Timelock block height (blank = none): ")?,
+    };
+
     println!("\nTransfer details:");
     println!("  Recipient: {}", shorten_hex(recipient_input.trim()));
     println!("  Faucet:    {}", shorten_hex(&faucet_id.to_hex()));
     println!("  Amount:    {} / {} available", amount, max_amount);
     println!("  Note:      {}", note_type);
+    if let Some(height) = heights.reclaim {
+        println!("  Reclaim:   block {}", height);
+    }
+    if let Some(height) = heights.timelock {
+        println!("  Timelock:  block {}", height);
+    }
 
     let confirm = prompt_input(editor, "\nConfirm? [y/N]: ")?;
     if confirm.to_lowercase() != "y" {
         return Err("Cancelled".to_string());
     }
 
-    Ok(TransactionType::transfer_with_note_type(
-        recipient, faucet_id, amount, note_type,
+    Ok(TransactionType::transfer_p2ide(
+        recipient, faucet_id, amount, note_type, heights,
     ))
+}
+
+/// Prompts for an optional P2IDE block height (issue #366). Blank => none;
+/// `0` is rejected because it encodes "no constraint" on-chain.
+fn prompt_p2ide_height(
+    editor: &mut DefaultEditor,
+    prompt: &str,
+) -> Result<Option<NonZeroU32>, String> {
+    let input = prompt_input(editor, prompt)?;
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(None);
+    }
+    match input.parse::<u32>() {
+        Ok(0) => Err("Block height must be greater than 0".to_string()),
+        Ok(height) => Ok(NonZeroU32::new(height)),
+        Err(_) => Err(format!("Invalid block height '{}'", input)),
+    }
 }
 
 async fn prompt_consume_notes(
@@ -1365,18 +1466,18 @@ async fn prompt_consume_notes(
             println!("  [{}] {}", idx + 1, shorten_hex(&note.id.to_hex()));
 
             for asset in &note.assets {
-                match asset {
-                    Asset::Fungible(f) => {
+                match asset.as_fungible() {
+                    Some(f) => {
                         println!(
                             "      - {} tokens (faucet: {})",
                             f.amount(),
                             shorten_hex(&f.faucet_id().to_hex())
                         );
                     }
-                    Asset::NonFungible(nft) => {
+                    None => {
                         println!(
                             "      - NFT (faucet: {})",
-                            shorten_hex(&nft.faucet_id().to_hex())
+                            shorten_hex(&asset.faucet_id().to_hex())
                         );
                     }
                 }
@@ -1552,5 +1653,19 @@ fn print_proposal_details(proposal: &ExportedProposal) {
         for signer in signers {
             println!("    - {}", shorten_hex(signer));
         }
+    }
+}
+
+/// One line under a listed proposal when its summary-binding check failed:
+/// a transient node error is worth listing again, anything else means the
+/// proposal cannot be reproduced and has to be re-proposed.
+fn print_verification(proposal: &Proposal) {
+    if let ProposalVerification::Failed { retryable, message } = &proposal.verification {
+        let hint = if *retryable {
+            "transient node error, list again"
+        } else {
+            "cannot be signed or executed, re-propose"
+        };
+        println!("      ⚠ UNVERIFIABLE ({}): {}", hint, message);
     }
 }

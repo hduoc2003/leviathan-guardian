@@ -1,9 +1,17 @@
 //! Note consumption transaction utilities.
 
-use miden_client::transaction::{NoteArgs, TransactionRequest, TransactionRequestBuilder};
-use miden_protocol::note::{Note, NoteId};
-use miden_protocol::{Felt, Word};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use miden_client::note::NoteFile;
+use miden_client::rpc::NodeRpcClient;
+use miden_client::store::{InputNoteRecord, NoteFilter as StoreNoteFilter};
+use miden_client::transaction::{NoteArgs, TransactionRequest, TransactionRequestBuilder};
+use miden_protocol::note::{Note, NoteId, NoteInclusionProof};
+use miden_protocol::{Felt, Word};
+use miden_standards::account::auth::MultisigAuthArgs;
+
+use super::TransactionRequestBuilderExt;
 use crate::MidenSdkClient;
 use crate::error::{MultisigError, Result};
 
@@ -43,7 +51,7 @@ pub(crate) async fn fetch_notes_from_store(
 /// Spec FR-005 / FR-013 / FR-014.
 pub fn build_consume_notes_transaction_request_from_notes<I>(
     notes: Vec<Note>,
-    salt: Word,
+    auth_args: &MultisigAuthArgs,
     signature_advice: I,
 ) -> Result<TransactionRequest>
 where
@@ -58,15 +66,13 @@ where
     let note_and_args: Vec<(Note, Option<NoteArgs>)> =
         notes.into_iter().map(|n| (n, None)).collect();
 
-    let mut builder = TransactionRequestBuilder::new()
-        .input_notes(note_and_args)
-        .auth_arg(salt);
+    let mut builder = TransactionRequestBuilder::new().input_notes(note_and_args);
 
     for (key, values) in signature_advice {
         builder = builder.extend_advice_map([(key, values)]);
     }
 
-    builder.build().map_err(|e| {
+    builder.multisig_auth_args(auth_args).build().map_err(|e| {
         MultisigError::TransactionExecution(format!("failed to build transaction request: {}", e))
     })
 }
@@ -83,7 +89,7 @@ where
 pub async fn build_consume_notes_transaction_request<I>(
     client: &MidenSdkClient,
     note_ids: Vec<NoteId>,
-    salt: Word,
+    auth_args: &MultisigAuthArgs,
     signature_advice: I,
 ) -> Result<TransactionRequest>
 where
@@ -96,5 +102,113 @@ where
     }
 
     let notes = fetch_notes_from_store(client, &note_ids).await?;
-    build_consume_notes_transaction_request_from_notes(notes, salt, signature_advice)
+    build_consume_notes_transaction_request_from_notes(notes, auth_args, signature_advice)
+}
+
+/// Makes every note in `notes` an *authenticated* input note in the client's
+/// local store: present, with its on-chain inclusion proof and block header.
+///
+/// miden-client decides per input note, at execution time and from the local
+/// store alone, whether it is consumed as authenticated (store holds a proof)
+/// or unauthenticated (anything else). The two modes commit differently into
+/// the transaction summary — `hash(nullifier || note_id_or_ZERO)` — so the
+/// proposer and every verifier must be in the same mode or the summary
+/// commitment, and with it the proposal id, differs (issue #409: a fresh
+/// cosigner whose store had never seen the notes failed with "metadata does
+/// not match tx_summary"). Authenticated is the canonical mode: proposal
+/// creation and every rebuild call this first, so the executed transaction is
+/// the one the cosigners signed regardless of what each store held before.
+///
+/// Notes already authenticated locally are left alone. For the rest the
+/// inclusion proofs come from the node in one round trip (the node serves
+/// proofs for private notes too) and each note is imported as committed,
+/// which also upgrades a proof-less record the store already tracked.
+///
+/// # Errors
+///
+/// `ConsumeNoteNotAuthenticated` when a note is not committed on chain yet,
+/// the node does not serve its proof, the import fails, or the record still
+/// lacks authentication after a sync.
+pub(crate) async fn ensure_notes_authenticated(
+    client: &mut MidenSdkClient,
+    node_rpc: &Arc<dyn NodeRpcClient>,
+    notes: &[Note],
+) -> Result<()> {
+    let pending = unauthenticated_notes(client, notes).await?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let ids: Vec<NoteId> = pending.iter().map(Note::id).collect();
+    let fetched = node_rpc.get_notes_by_id(&ids).await.map_err(|e| {
+        MultisigError::ConsumeNoteNotAuthenticated {
+            note_id: ids[0],
+            reason: format!("failed to fetch inclusion proofs from the node: {e}"),
+        }
+    })?;
+    let mut proofs: BTreeMap<NoteId, NoteInclusionProof> = fetched
+        .iter()
+        .map(|f| (f.id(), f.inclusion_proof().clone()))
+        .collect();
+
+    for note in pending {
+        let note_id = note.id();
+        let Some(proof) = proofs.remove(&note_id) else {
+            return Err(MultisigError::ConsumeNoteNotAuthenticated {
+                note_id,
+                reason: "the node has no inclusion proof for it (not committed on chain yet)"
+                    .to_string(),
+            });
+        };
+        client
+            .import_notes(&[NoteFile::Committed { note, proof }])
+            .await
+            .map_err(|e| MultisigError::ConsumeNoteNotAuthenticated {
+                note_id,
+                reason: format!("failed to import it with its inclusion proof: {e}"),
+            })?;
+    }
+
+    // The import authenticates a note committed at or below the client's
+    // sync height; a newer one lands unverified until a sync fetches its
+    // block header. A cosigner that just pulled the account is typically
+    // behind the note's block, so sync once and re-check before failing.
+    if !unauthenticated_notes(client, notes).await?.is_empty() {
+        client.sync_state().await.map_err(|e| {
+            MultisigError::miden_client_with_context(
+                "failed to sync while authenticating consume-notes input notes",
+                e,
+            )
+        })?;
+    }
+    if let Some(still) = unauthenticated_notes(client, notes).await?.first() {
+        return Err(MultisigError::ConsumeNoteNotAuthenticated {
+            note_id: still.id(),
+            reason: "its inclusion proof was imported but the local store could not \
+                     verify it against the chain even after a sync"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The subset of `notes` whose local record is missing or carries no
+/// inclusion proof, in the order given.
+async fn unauthenticated_notes(client: &MidenSdkClient, notes: &[Note]) -> Result<Vec<Note>> {
+    let records: BTreeMap<NoteId, InputNoteRecord> = client
+        .get_input_notes(StoreNoteFilter::List(notes.iter().map(Note::id).collect()))
+        .await
+        .map_err(|e| MultisigError::miden_client_with_context("failed to read local notes", e))?
+        .into_iter()
+        .filter_map(|record| record.id().map(|id| (id, record)))
+        .collect();
+    Ok(notes
+        .iter()
+        .filter(|note| {
+            !records
+                .get(&note.id())
+                .is_some_and(InputNoteRecord::is_authenticated)
+        })
+        .cloned()
+        .collect())
 }

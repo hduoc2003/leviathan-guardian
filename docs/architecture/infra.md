@@ -26,7 +26,7 @@ storage autoscaling on top of the same base topology.
 ```mermaid
 flowchart LR
   Client["Client<br/>(SDK / curl / grpcurl)"]
-  DNS["Route 53 / Cloudflare<br/>guardian.openzeppelin.com"]
+  DNS["Route 53 / Cloudflare<br/>guardian-testnet.openzeppelin.com"]
   ACM["ACM certificate"]
 
   subgraph VPC["AWS VPC"]
@@ -97,7 +97,7 @@ sequenceDiagram
   participant DB as RDS Postgres
   participant SM as Secrets Manager
 
-  C->>DNS: resolve guardian.openzeppelin.com
+  C->>DNS: resolve guardian-testnet.openzeppelin.com
   DNS-->>C: ALB DNS / Cloudflare IP
   C->>ALB: HTTPS or gRPC over :443
   ALB->>ALB: ACM TLS termination
@@ -114,9 +114,9 @@ sequenceDiagram
   ALB-->>C: response
 ```
 
-Health checks: the HTTP target group probes `GET /` ([`alb.tf:33`](../../infra/alb.tf#L33));
+Health checks: the HTTP target group probes `GET /` ([`alb.tf:59`](../../infra/alb.tf#L59));
 the gRPC target group probes `/guardian.Guardian/GetPubkey` with matcher `0`
-([`alb.tf:55`](../../infra/alb.tf#L55)).
+([`alb.tf:81`](../../infra/alb.tf#L81)).
 
 ## Resource inventory
 
@@ -129,11 +129,11 @@ Mapping AWS resources to the Terraform files that own them:
 | ECS task definition | [`ecs.tf:32`](../../infra/ecs.tf#L32) | One container, ports `3000` + `50051`, env + secret env from Secrets Manager. |
 | ECS autoscaling target + policies | [`ecs_autoscaling.tf`](../../infra/ecs_autoscaling.tf) | CPU + memory target-tracking, only created when `effective_server_autoscaling_enabled`. |
 | ALB | [`alb.tf:2`](../../infra/alb.tf#L2) | Internet-facing, at least two subnets enforced as precondition. |
-| HTTP target group (`:3000`) | [`alb.tf:20`](../../infra/alb.tf#L20) | Health check `GET /`. |
-| gRPC target group (`:50051`) | [`alb.tf:39`](../../infra/alb.tf#L39) | Created only when an ACM cert is present. |
-| HTTP listener `:80` | [`alb.tf:61`](../../infra/alb.tf#L61) | Forwards when no cert, redirects to HTTPS when cert is present. |
-| HTTPS listener `:443` | [`alb.tf:95`](../../infra/alb.tf#L95) | TLS 1.3-1.2 policy; default action → HTTP target group. |
-| gRPC listener rule | [`alb.tf:110`](../../infra/alb.tf#L110) | Path `/guardian.Guardian/*` → gRPC target group, priority `10`. |
+| HTTP target group (`:3000`) | [`alb.tf:46`](../../infra/alb.tf#L46) | Health check `GET /`. |
+| gRPC target group (`:50051`) | [`alb.tf:65`](../../infra/alb.tf#L65) | Created only when an ACM cert is present. |
+| HTTP listener `:80` | [`alb.tf:87`](../../infra/alb.tf#L87) | Forwards when no cert, redirects to HTTPS when cert is present. |
+| HTTPS listener `:443` | [`alb.tf:121`](../../infra/alb.tf#L121) | TLS 1.3-1.2 policy; default action → HTTP target group. A migration can temporarily attach a second certificate through [`alb.tf:138`](../../infra/alb.tf#L138). |
+| gRPC listener rule | [`alb.tf:151`](../../infra/alb.tf#L151) | Path `/guardian.Guardian/*` → gRPC target group, priority `10`. |
 | RDS Postgres instance | [`rds.tf:20`](../../infra/rds.tf#L20) | Storage encrypted, backups retained per `rds_backup_retention_days`; prod defaults enable deletion protection and a final snapshot on destroy. |
 | RDS subnet group | [`rds.tf:8`](../../infra/rds.tf#L8) | Requires ≥2 subnets. |
 | `DATABASE_URL` secret | [`rds.tf:45`](../../infra/rds.tf#L45) | Always created; consumed by the server task. |
@@ -151,9 +151,14 @@ Mapping AWS resources to the Terraform files that own them:
 | ACK secrets policy | [`iam.tf:70`](../../infra/iam.tf#L70) | Gated on `local.is_prod` — dev never reads ACK secrets. |
 | Operator pubkeys policy | [`iam.tf:93`](../../infra/iam.tf#L93) | Created if user supplies an existing ARN or a managed list. |
 | RDS Proxy role | [`iam.tf:136`](../../infra/iam.tf#L136) | Reads the proxy's credentials secret. |
-| CloudWatch log groups | [`logs.tf`](../../infra/logs.tf) | `server` group and `cluster` (ECS Exec) group. |
-| Route 53 alias | [`dns.tf:12`](../../infra/dns.tf#L12) | Created when `route53_zone_id` is set. |
-| Cloudflare CNAME | [`dns.tf:27`](../../infra/dns.tf#L27) | Created when `cloudflare_zone_id` is set; can be proxied. |
+| CloudWatch log groups | [`logs.tf`](../../infra/logs.tf) | `server` group, `cluster` (ECS Exec) group, and the EMF metrics group when CloudWatch metrics are enabled. |
+| ADOT metrics sidecar + collector config | [`ecs.tf`](../../infra/ecs.tf), [`observability.tf`](../../infra/observability.tf) | Non-essential container in the server task; config injected via `AOT_CONFIG_CONTENT`. |
+| CloudWatch dashboard + alarms | [`observability.tf`](../../infra/observability.tf) | `<stack>-server` dashboard; error-rate, latency, canonicalization, metrics-pipeline, and ECS saturation alarms. |
+| Alarm SNS topic + Slack channel | [`alerting.tf`](../../infra/alerting.tf) | Opt-in `<stack>-alarms` topic appended to every alarm's ALARM/OK actions; optional Amazon Q Developer in chat applications Slack channel configuration subscribed to it, with a notifications-only channel role. |
+| CloudWatch log metric filters + log-errors alarm | [`log_alarms.tf`](../../infra/log_alarms.tf) | ERROR/WARN line counts from the server log group as custom metrics; alarm on sustained ERROR output. Gated by `cloudwatch_log_alarms_enabled`, requires JSON logs (plan-time precondition). |
+| ADOT EMF log-write policy | [`iam.tf`](../../infra/iam.tf) | Task-role, stream-level writes on the EMF group only. |
+| Route 53 alias | [`dns.tf:12`](../../infra/dns.tf#L12) | Created when `route53_zone_id` is set; hostname migrations may temporarily add a second record. |
+| Cloudflare CNAME | [`dns.tf:27`](../../infra/dns.tf#L27) | Created when `cloudflare_zone_id` is set; can be proxied, with the same temporary migration support. |
 | Variables / locals | [`variables.tf`](../../infra/variables.tf), [`data.tf`](../../infra/data.tf) | `local.is_prod`, `effective_*` locals derive the stage profile. |
 
 ECR is **not** managed by Terraform — it is created and pushed to by
@@ -260,10 +265,29 @@ in use.
 ## Observability surface
 
 Today: CloudWatch container logs ([`logs.tf`](../../infra/logs.tf)),
-Container Insights metrics ([`ecs.tf:6`](../../infra/ecs.tf#L6)), and
-ECS Exec session logging ([`ecs.tf:10`](../../infra/ecs.tf#L10)). There are
-no Terraform-managed dashboards, alarms, or tracing exporters yet — that
-remains an open production-hardening gap.
+Container Insights metrics ([`ecs.tf:6`](../../infra/ecs.tf#L6)),
+ECS Exec session logging ([`ecs.tf:10`](../../infra/ecs.tf#L10)), and
+Terraform-managed application metrics
+([`observability.tf`](../../infra/observability.tf)): an ADOT Collector
+sidecar in the server task scrapes Guardian's loopback-only Prometheus
+endpoint and exports selected metrics to CloudWatch via EMF under a
+per-stack namespace, with a `<stack>-server` dashboard and alarms for
+error rate, latency, canonicalization failures, metrics-pipeline health,
+and ECS saturation. Alarm delivery is opt-in
+([`alerting.tf`](../../infra/alerting.tf)): a managed `<stack>-alarms` SNS
+topic, optionally routed to a per-environment Slack channel through Amazon Q
+Developer in chat applications, alongside any operator-supplied
+`alarm_actions` ARNs. Gated by `guardian_metrics_enabled` (the endpoint)
+and `cloudwatch_metrics_enabled` (the export pipeline), both on by
+default; enablement and verification live in
+[`SERVER_AWS_DEPLOY.md`](../SERVER_AWS_DEPLOY.md#metrics-dashboard-and-alarms).
+Log-level monitoring is separate from that pipeline: metric filters on the
+server log group ([`log_alarms.tf`](../../infra/log_alarms.tf)) count
+ERROR/WARN lines from the JSON log output and an alarm fires on sustained
+ERROR output, so alerting on logged faults survives
+`guardian_metrics_enabled = false` (process liveness does not: a
+crash-looping task prints no JSON).
+Tracing exporters remain an open gap.
 
 ## Things that are deliberately not here
 

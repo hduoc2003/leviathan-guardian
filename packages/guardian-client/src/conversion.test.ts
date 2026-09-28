@@ -454,6 +454,21 @@ describe('conversion', () => {
       expect(result.salt).toBe(original.salt);
     });
 
+    it('chainAnchor survives roundtrip as chain_anchor on the wire', () => {
+      const original: ProposalMetadata = {
+        proposalType: 'add_signer',
+        targetThreshold: 2,
+        signerCommitments: ['0xabc'],
+        chainAnchor: 'bW9jay1jaGFpbi1hbmNob3I=',
+      };
+
+      const server = toServerProposalMetadata(original);
+      expect(server.chain_anchor).toBe('bW9jay1jaGFpbi1hbmNob3I=');
+
+      const result = fromServerProposalMetadata(server);
+      expect(result.chainAnchor).toBe('bW9jay1jaGFpbi1hbmNob3I=');
+    });
+
     it('p2id noteType survives roundtrip as note_type on the wire (issue #322)', () => {
       const original: ProposalMetadata = {
         proposalType: 'p2id',
@@ -468,6 +483,25 @@ describe('conversion', () => {
 
       const result = fromServerProposalMetadata(server);
       expect(result.noteType).toBe('private');
+    });
+
+    it('p2ide heights survive roundtrip as reclaim_height/timelock_height on the wire (issue #366)', () => {
+      const original: ProposalMetadata = {
+        proposalType: 'p2id',
+        recipientId: '0xrecipient',
+        faucetId: '0xfaucet',
+        amount: '1000',
+        reclaimHeight: 12345,
+        timelockHeight: 700,
+      };
+
+      const server = toServerProposalMetadata(original);
+      expect(server.reclaim_height).toBe(12345);
+      expect(server.timelock_height).toBe(700);
+
+      const result = fromServerProposalMetadata(server);
+      expect(result.reclaimHeight).toBe(12345);
+      expect(result.timelockHeight).toBe(700);
     });
   });
 });

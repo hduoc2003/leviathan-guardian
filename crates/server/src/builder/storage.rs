@@ -18,8 +18,8 @@ use crate::storage::encryption::decorator::EncryptedStorage;
 #[cfg(feature = "tee")]
 use crate::storage::encryption::dstack::{GuestAgentClient, load_dstack_provider};
 use crate::storage::encryption::key_provider::{
-    DEFAULT_KID, ENV_DSTACK_PATH, ENV_KEY, ENV_KEY_ID, ENV_SECRET_ID, InMemoryKeyProvider,
-    KeyProviderError, StorageKeyProvider,
+    DEFAULT_KID, ENV_DSTACK_PATH, ENV_KEY, ENV_KEY_FILE, ENV_KEY_ID, ENV_SECRET_ID,
+    InMemoryKeyProvider, KeyProviderError, StorageKeyProvider,
 };
 use crate::storage::encryption::marker::{MarkerStore, apply_startup_guard};
 #[cfg(not(feature = "postgres"))]
@@ -27,8 +27,6 @@ use crate::storage::filesystem::FilesystemService;
 #[cfg(feature = "postgres")]
 use crate::storage::postgres::{self, PostgresService};
 
-#[cfg(feature = "postgres")]
-const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 16;
 #[cfg(feature = "postgres")]
 const ENV_DB_POOL_MAX_SIZE: &str = "GUARDIAN_DB_POOL_MAX_SIZE";
 #[cfg(feature = "postgres")]
@@ -112,11 +110,7 @@ impl StorageMetadataBuilder {
                 .database_url
                 .filter(|url| !url.expose_secret().trim().is_empty())
                 .ok_or_else(|| "DATABASE_URL environment variable is required".to_string())?;
-            let database_pool_max_size = resolve_pool_size(
-                self.database_pool_max_size,
-                ENV_DB_POOL_MAX_SIZE,
-                DEFAULT_POSTGRES_POOL_MAX_SIZE,
-            )?;
+            let database_pool_max_size = resolve_storage_pool_size(self.database_pool_max_size)?;
             let metadata_pool_max_size = resolve_pool_size(
                 self.metadata_pool_max_size,
                 ENV_METADATA_DB_POOL_MAX_SIZE,
@@ -130,11 +124,12 @@ impl StorageMetadataBuilder {
             let metadata = PostgresMetadataStore::new(raw_url, metadata_pool_max_size).await?;
             let auditor: SharedAuditor = Arc::new(PostgresAuditor::new(metadata.pool_handle()));
 
-            let storage = wrap_with_encryption(storage).await?;
+            let (storage, cipher) = wrap_with_encryption(storage).await?;
             let holder_id = format!("{}-{:016x}", std::process::id(), rand::random::<u64>());
             let coordination = crate::coordination::CoordinationHandles::postgres(
                 metadata.pool_handle(),
                 holder_id,
+                cipher,
             );
 
             Ok((storage, Arc::new(metadata), auditor, coordination))
@@ -164,7 +159,9 @@ impl StorageMetadataBuilder {
             );
             let auditor: SharedAuditor = Arc::new(LogAuditor::new());
 
-            let storage = wrap_with_encryption(storage).await?;
+            // The in-memory stats store never touches disk, so the
+            // cipher is not needed on this path.
+            let (storage, _cipher) = wrap_with_encryption(storage).await?;
             let coordination = crate::coordination::CoordinationHandles::in_memory();
 
             Ok((storage, Arc::new(metadata), auditor, coordination))
@@ -188,7 +185,13 @@ fn reject_filesystem_in_prod(is_prod: bool) -> Result<(), String> {
     Ok(())
 }
 
-async fn wrap_with_encryption<S>(storage: S) -> Result<Arc<dyn StorageBackend>, String>
+/// Wrap `storage` in the encryption decorator when a key source is
+/// configured. Also returns the cipher so other at-rest writers that
+/// bypass `StorageBackend` (the published `/dashboard/stats` snapshot)
+/// seal their payloads under the same key material.
+async fn wrap_with_encryption<S>(
+    storage: S,
+) -> Result<(Arc<dyn StorageBackend>, Option<Arc<dyn StorageCipher>>), String>
 where
     S: StorageBackend + MarkerStore + 'static,
 {
@@ -198,65 +201,84 @@ where
         Some(provider) => {
             let cipher: Arc<dyn StorageCipher> = Arc::new(Aes256GcmCipher::new(provider));
             let inner: Arc<dyn StorageBackend> = Arc::new(storage);
-            Ok(Arc::new(EncryptedStorage::new(inner, cipher)))
+            Ok((
+                Arc::new(EncryptedStorage::new(inner, cipher.clone())),
+                Some(cipher),
+            ))
         }
-        None => Ok(Arc::new(storage)),
+        None => Ok((Arc::new(storage), None)),
+    }
+}
+
+/// Where the storage encryption key material comes from. Exactly one source
+/// may be configured; presence of any source turns encryption on.
+enum StorageKeySource {
+    DirectKey(SecretString),
+    DocumentFile(PathBuf),
+    SecretsManager(String),
+    Dstack(String),
+}
+
+impl StorageKeySource {
+    fn from_env() -> Result<Option<Self>, String> {
+        let configured = [
+            non_empty_env(ENV_KEY).map(|key| Self::DirectKey(SecretString::new(key))),
+            non_empty_env(ENV_KEY_FILE).map(|path| Self::DocumentFile(PathBuf::from(path))),
+            non_empty_env(ENV_SECRET_ID).map(Self::SecretsManager),
+            non_empty_env(ENV_DSTACK_PATH).map(Self::Dstack),
+        ];
+        let mut sources = configured.into_iter().flatten();
+        let source = sources.next();
+        if sources.next().is_some() {
+            return Err(KeyProviderError::MultipleKeySources.to_string());
+        }
+        Ok(source)
+    }
+
+    async fn load(self) -> Result<InMemoryKeyProvider, String> {
+        match self {
+            Self::DirectKey(key) => {
+                let kid = non_empty_env(ENV_KEY_ID).unwrap_or_else(|| DEFAULT_KID.to_string());
+                InMemoryKeyProvider::from_dev_key(key.expose_secret(), &kid)
+                    .map_err(|e| e.to_string())
+            }
+            Self::DocumentFile(path) => {
+                InMemoryKeyProvider::from_document_file(&path).map_err(|e| e.to_string())
+            }
+            Self::SecretsManager(secret_id) => {
+                let secret = fetch_secret_document(&secret_id).await?;
+                InMemoryKeyProvider::from_secret_json(secret.expose_secret())
+                    .map_err(|e| e.to_string())
+            }
+            Self::Dstack(path) => load_dstack_key(&path).await,
+        }
     }
 }
 
 async fn resolve_storage_key_provider() -> Result<Option<Arc<dyn StorageKeyProvider>>, String> {
-    let env_key = non_empty_env(ENV_KEY);
-    let secret_id = non_empty_env(ENV_SECRET_ID);
-    let dstack_path = non_empty_env(ENV_DSTACK_PATH);
-
-    let configured = [
-        env_key.is_some(),
-        secret_id.is_some(),
-        dstack_path.is_some(),
-    ]
-    .into_iter()
-    .filter(|set| *set)
-    .count();
-    if configured > 1 {
-        return Err(KeyProviderError::MultipleKeySources.to_string());
+    match StorageKeySource::from_env()? {
+        Some(source) => {
+            let provider: Arc<dyn StorageKeyProvider> = Arc::new(source.load().await?);
+            Ok(Some(provider))
+        }
+        None => Ok(None),
     }
-
-    if let Some(path) = dstack_path {
-        return resolve_dstack_provider(&path).await;
-    }
-    if let Some(key) = env_key {
-        let kid = non_empty_env(ENV_KEY_ID).unwrap_or_else(|| DEFAULT_KID.to_string());
-        let provider = InMemoryKeyProvider::from_dev_key(&key, &kid).map_err(|e| e.to_string())?;
-        return Ok(Some(Arc::new(provider)));
-    }
-    if let Some(secret_id) = secret_id {
-        let secret = fetch_secret_document(&secret_id).await?;
-        let provider = InMemoryKeyProvider::from_secret_json(secret.expose_secret())
-            .map_err(|e| e.to_string())?;
-        return Ok(Some(Arc::new(provider)));
-    }
-    Ok(None)
 }
 
 /// Derivation happens at startup rather than lazily so a missing guest agent or
 /// an unapproved compose hash stops the boot instead of the first write.
 #[cfg(feature = "tee")]
-async fn resolve_dstack_provider(
-    path: &str,
-) -> Result<Option<Arc<dyn StorageKeyProvider>>, String> {
+async fn load_dstack_key(path: &str) -> Result<InMemoryKeyProvider, String> {
     let client = GuestAgentClient::new();
-    let provider = load_dstack_provider(&client, path)
+    load_dstack_provider(&client, path)
         .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(Arc::new(provider)))
+        .map_err(|e| e.to_string())
 }
 
 /// Refusing beats ignoring: without `tee` the binary would otherwise boot with
 /// encryption silently off while the deployment believes it is on.
 #[cfg(not(feature = "tee"))]
-async fn resolve_dstack_provider(
-    _path: &str,
-) -> Result<Option<Arc<dyn StorageKeyProvider>>, String> {
+async fn load_dstack_key(_path: &str) -> Result<InMemoryKeyProvider, String> {
     Err(format!(
         "{ENV_DSTACK_PATH} is set but this binary was built without the `tee` feature"
     ))
@@ -286,6 +308,19 @@ async fn fetch_secret_document(secret_id: &str) -> Result<SecretString, String> 
         .secret_string()
         .map(|s| SecretString::new(s.to_owned()))
         .ok_or_else(|| format!("Storage encryption secret {secret_id} has no string value"))
+}
+
+/// Storage pool size: an explicit builder value wins, then
+/// `GUARDIAN_DB_POOL_MAX_SIZE`, then the [`Stage`] default (`32` in prod, `16`
+/// otherwise). The metadata pool follows this value unless set separately.
+#[cfg(feature = "postgres")]
+fn resolve_storage_pool_size(configured_value: Option<usize>) -> Result<usize, String> {
+    let stage = crate::config::stage::Stage::from_env().map_err(|error| error.to_string())?;
+    resolve_pool_size(
+        configured_value,
+        ENV_DB_POOL_MAX_SIZE,
+        stage.default_db_pool_max_size(),
+    )
 }
 
 #[cfg(feature = "postgres")]
@@ -332,7 +367,13 @@ mod tests {
 
     impl EncEnvGuard {
         fn clear() -> Self {
-            for key in [ENV_KEY, ENV_KEY_ID, ENV_SECRET_ID, ENV_DSTACK_PATH] {
+            for key in [
+                ENV_KEY,
+                ENV_KEY_ID,
+                ENV_KEY_FILE,
+                ENV_SECRET_ID,
+                ENV_DSTACK_PATH,
+            ] {
                 // SAFETY: serialized by ENCRYPTION_ENV_LOCK
                 unsafe { std::env::remove_var(key) };
             }
@@ -347,7 +388,13 @@ mod tests {
 
     impl Drop for EncEnvGuard {
         fn drop(&mut self) {
-            for key in [ENV_KEY, ENV_KEY_ID, ENV_SECRET_ID, ENV_DSTACK_PATH] {
+            for key in [
+                ENV_KEY,
+                ENV_KEY_ID,
+                ENV_KEY_FILE,
+                ENV_SECRET_ID,
+                ENV_DSTACK_PATH,
+            ] {
                 // SAFETY: serialized by ENCRYPTION_ENV_LOCK
                 unsafe { std::env::remove_var(key) };
             }
@@ -433,6 +480,56 @@ mod tests {
             matches!(&result, Err(message) if message.contains("without the `tee` feature")),
             "a build without `tee` must refuse, not fall through to unencrypted storage"
         );
+    }
+
+    fn write_key_document(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("keys.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"active":"k2","keys":{{"k1":"{}","k2":"{}"}}}}"#,
+                BASE64.encode([1u8; 32]),
+                BASE64.encode([2u8; 32])
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_from_document_file() {
+        let _lock = ENCRYPTION_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_key_document(dir.path());
+        let _env = EncEnvGuard::clear().set(ENV_KEY_FILE, path.to_str().unwrap());
+        let provider = resolve_storage_key_provider().await.unwrap().unwrap();
+        assert_eq!(provider.active_key_id(), "k2");
+        assert_eq!(provider.key("k1").unwrap().expose_secret(), &[1u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_rejects_document_file_alongside_direct_key() {
+        let _lock = ENCRYPTION_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_key_document(dir.path());
+        let _env = EncEnvGuard::clear()
+            .set(ENV_KEY, &BASE64.encode([5u8; 32]))
+            .set(ENV_KEY_FILE, path.to_str().unwrap());
+        let result = resolve_storage_key_provider().await;
+        assert!(matches!(&result, Err(message) if message.contains("more than one")));
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_reports_missing_document_file() {
+        let _lock = ENCRYPTION_ENV_LOCK.lock().await;
+        let _env = EncEnvGuard::clear().set(ENV_KEY_FILE, "/nonexistent/guardian-keys.json");
+        let result = resolve_storage_key_provider().await;
+        assert!(matches!(&result, Err(message) if message.contains("unavailable")));
     }
 
     #[test]
@@ -659,72 +756,136 @@ mod tests {
     }
 
     #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn test_build_without_database_url_fails() {
-        let builder = StorageMetadataBuilder::new();
+    mod postgres {
+        use super::*;
 
-        let result = builder.build().await;
-        assert!(result.is_err());
-        assert_eq!(
-            result.err().unwrap(),
-            "DATABASE_URL environment variable is required"
-        );
+        static POOL_SIZE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        #[tokio::test]
+        async fn test_build_without_database_url_fails() {
+            let builder = StorageMetadataBuilder::new();
+
+            let result = builder.build().await;
+            assert!(result.is_err());
+            assert_eq!(
+                result.err().unwrap(),
+                "DATABASE_URL environment variable is required"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_build_with_empty_database_url_fails() {
+            let builder =
+                StorageMetadataBuilder::new().database_url(Some(CredentialUrl::new(String::new())));
+
+            let result = builder.build().await;
+            assert!(result.is_err());
+            assert_eq!(
+                result.err().unwrap(),
+                "DATABASE_URL environment variable is required"
+            );
+        }
+
+        #[test]
+        fn test_resolve_pool_size_uses_default_when_env_missing() {
+            let _lock = POOL_SIZE_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            // SAFETY: serialized by POOL_SIZE_ENV_LOCK; this variable is private to this module.
+            unsafe { std::env::remove_var(ENV_DB_POOL_MAX_SIZE) };
+            let result = resolve_pool_size(None, ENV_DB_POOL_MAX_SIZE, 16).unwrap();
+            assert_eq!(result, 16);
+        }
+
+        #[test]
+        fn test_resolve_pool_size_uses_explicit_value() {
+            let result = resolve_pool_size(Some(24), ENV_DB_POOL_MAX_SIZE, 16).unwrap();
+            assert_eq!(result, 24);
+        }
+
+        #[test]
+        fn test_resolve_pool_size_reads_env_override() {
+            let _lock = POOL_SIZE_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            // SAFETY: serialized by POOL_SIZE_ENV_LOCK; this variable is private to this module.
+            unsafe { std::env::set_var(ENV_DB_POOL_MAX_SIZE, "32") };
+            let result = resolve_pool_size(None, ENV_DB_POOL_MAX_SIZE, 16).unwrap();
+            // SAFETY: serialized by POOL_SIZE_ENV_LOCK; this variable is private to this module.
+            unsafe { std::env::remove_var(ENV_DB_POOL_MAX_SIZE) };
+            assert_eq!(result, 32);
+        }
+
+        #[test]
+        fn test_resolve_pool_size_rejects_invalid_env_override() {
+            let _lock = POOL_SIZE_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            // SAFETY: serialized by POOL_SIZE_ENV_LOCK; this variable is private to this module.
+            unsafe { std::env::set_var(ENV_DB_POOL_MAX_SIZE, "nope") };
+            let result = resolve_pool_size(None, ENV_DB_POOL_MAX_SIZE, 16);
+            // SAFETY: serialized by POOL_SIZE_ENV_LOCK; this variable is private to this module.
+            unsafe { std::env::remove_var(ENV_DB_POOL_MAX_SIZE) };
+            assert!(result.is_err());
+        }
     }
 
     #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn test_build_with_empty_database_url_fails() {
-        let builder =
-            StorageMetadataBuilder::new().database_url(Some(CredentialUrl::new(String::new())));
+    mod stage_pool_size {
+        use super::super::*;
+        use crate::testing::env_lock::ENV_LOCK;
 
-        let result = builder.build().await;
-        assert!(result.is_err());
-        assert_eq!(
-            result.err().unwrap(),
-            "DATABASE_URL environment variable is required"
-        );
-    }
+        fn with_env<T>(pool: Option<&str>, stage: Option<&str>, f: impl FnOnce() -> T) -> T {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+            // SAFETY: serialized by ENV_LOCK; both variables are removed before returning.
+            unsafe {
+                match pool {
+                    Some(v) => std::env::set_var(ENV_DB_POOL_MAX_SIZE, v),
+                    None => std::env::remove_var(ENV_DB_POOL_MAX_SIZE),
+                }
+                match stage {
+                    Some(v) => std::env::set_var("GUARDIAN_ENV", v),
+                    None => std::env::remove_var("GUARDIAN_ENV"),
+                }
+            }
+            let result = f();
+            // SAFETY: serialized by ENV_LOCK.
+            unsafe {
+                std::env::remove_var(ENV_DB_POOL_MAX_SIZE);
+                std::env::remove_var("GUARDIAN_ENV");
+            }
+            result
+        }
 
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn test_resolve_pool_size_uses_default_when_env_missing() {
-        unsafe {
-            std::env::remove_var(ENV_DB_POOL_MAX_SIZE);
+        #[test]
+        fn unset_everything_is_the_dev_default() {
+            assert_eq!(
+                with_env(None, None, || resolve_storage_pool_size(None)).unwrap(),
+                16
+            );
         }
-        let result = resolve_pool_size(None, ENV_DB_POOL_MAX_SIZE, 16).unwrap();
-        assert_eq!(result, 16);
-    }
 
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn test_resolve_pool_size_uses_explicit_value() {
-        let result = resolve_pool_size(Some(24), ENV_DB_POOL_MAX_SIZE, 16).unwrap();
-        assert_eq!(result, 24);
-    }
+        #[test]
+        fn prod_stage_raises_the_default() {
+            assert_eq!(
+                with_env(None, Some("prod"), || resolve_storage_pool_size(None)).unwrap(),
+                32
+            );
+        }
 
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn test_resolve_pool_size_reads_env_override() {
-        unsafe {
-            std::env::set_var(ENV_DB_POOL_MAX_SIZE, "32");
+        #[test]
+        fn env_and_explicit_values_win_over_the_stage() {
+            assert_eq!(
+                with_env(Some("48"), Some("prod"), || resolve_storage_pool_size(None)).unwrap(),
+                48
+            );
+            assert_eq!(
+                with_env(Some("48"), Some("prod"), || resolve_storage_pool_size(
+                    Some(8)
+                ))
+                .unwrap(),
+                8
+            );
         }
-        let result = resolve_pool_size(None, ENV_DB_POOL_MAX_SIZE, 16).unwrap();
-        unsafe {
-            std::env::remove_var(ENV_DB_POOL_MAX_SIZE);
-        }
-        assert_eq!(result, 32);
-    }
-
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn test_resolve_pool_size_rejects_invalid_env_override() {
-        unsafe {
-            std::env::set_var(ENV_DB_POOL_MAX_SIZE, "nope");
-        }
-        let result = resolve_pool_size(None, ENV_DB_POOL_MAX_SIZE, 16);
-        unsafe {
-            std::env::remove_var(ENV_DB_POOL_MAX_SIZE);
-        }
-        assert!(result.is_err());
     }
 }

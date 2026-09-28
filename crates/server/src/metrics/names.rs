@@ -12,6 +12,13 @@
 //! proto definition, static operation names, and small closed enums.
 //! Account IDs, nonces, commitments, pubkeys, client IPs, and error
 //! strings must never become label values.
+//!
+//! Downstream consumers re-list parts of this taxonomy and do not track
+//! it automatically: the CloudWatch export allowlist in
+//! `infra/observability.tf` (metrics absent there never reach
+//! CloudWatch) and the Grafana dashboard in
+//! `docs/guides/observability/grafana/dashboards/guardian.json`. Adding
+//! or renaming a metric here means revisiting both.
 
 // --- HTTP request path -------------------------------------------------
 
@@ -85,6 +92,15 @@ pub const ACCOUNTS_GAUGE: &str = "guardian_accounts";
 pub const ACCOUNTS_CREATED_TOTAL: &str = "guardian_accounts_created_total";
 pub const METRICS_REFRESH_TIMESTAMP_SECONDS: &str = "guardian_metrics_refresh_timestamp_seconds";
 pub const METRICS_REFRESH_FAILURES_TOTAL: &str = "guardian_metrics_refresh_failures_total";
+
+// --- Dashboard stats aggregate (set by its background refresher) ---------
+
+pub const DASHBOARD_STATS_REFRESH_TIMESTAMP_SECONDS: &str =
+    "guardian_dashboard_stats_refresh_timestamp_seconds";
+pub const DASHBOARD_STATS_REFRESH_FAILURES_TOTAL: &str =
+    "guardian_dashboard_stats_refresh_failures_total";
+pub const DASHBOARD_STATS_REFRESH_DURATION_SECONDS: &str =
+    "guardian_dashboard_stats_refresh_duration_seconds";
 
 // --- Build identity ------------------------------------------------------
 
@@ -413,6 +429,27 @@ pub const REGISTRY: &[MetricDef] = &[
         labels: &[],
         help: "Slow-aggregate refresh attempts that failed (gauges left stale).",
     },
+    MetricDef {
+        name: DASHBOARD_STATS_REFRESH_TIMESTAMP_SECONDS,
+        kind: MetricKind::Gauge,
+        labels: &[],
+        help: "Unix time of the last successfully published /dashboard/stats aggregate \
+               (the response's as_of). Staleness is time() minus this value.",
+    },
+    MetricDef {
+        name: DASHBOARD_STATS_REFRESH_FAILURES_TOTAL,
+        kind: MetricKind::Counter,
+        labels: &[],
+        help: "/dashboard/stats aggregate refresh attempts that failed (previous \
+               snapshot left published).",
+    },
+    MetricDef {
+        name: DASHBOARD_STATS_REFRESH_DURATION_SECONDS,
+        kind: MetricKind::Histogram,
+        labels: &[],
+        help: "Wall-clock duration of one /dashboard/stats aggregate refresh \
+               (metadata walk, batched state reads, vault decoding).",
+    },
 ];
 
 /// Bound the `route` label to the axum route template. Templates like
@@ -459,6 +496,7 @@ const KNOWN_GRPC_METHODS: &[(&str, &str)] = &[
     ("guardian.Guardian", "SignDeltaProposal"),
     ("guardian.Guardian", "AbandonDeltaCandidate"),
     ("guardian.Guardian", "GetAccountByKeyCommitment"),
+    ("guardian.Guardian", "GetDeltaHistory"),
     // Served alongside Guardian via tonic-reflection (v1 and v1alpha).
     (
         "grpc.reflection.v1.ServerReflection",

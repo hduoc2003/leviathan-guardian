@@ -29,7 +29,7 @@ This launches the server with the filesystem backend. HTTP binds on
 ## Verify
 
 ```bash
-curl http://localhost:3000/                   # liveness — expect 200 OK
+curl http://localhost:3000/                   # liveness — same body as /status, expect 200 OK
 curl http://localhost:3000/pubkey             # expect { "commitment": "0x..." }
 ```
 
@@ -56,8 +56,14 @@ This is enough to point an example SDK at:
 cd examples/demo && cargo run --release
 ```
 
-The demo also needs a Miden RPC endpoint (Devnet works out of the box).
-See [`docs/LOCAL_DEV.md`](./LOCAL_DEV.md#prerequisites) if your network
+The demo also needs a Miden RPC endpoint running the Miden line this
+workspace pins. [`MIDEN_COMPATIBILITY.md`](./MIDEN_COMPATIBILITY.md#support-matrix)
+says which line that is and which public networks run it; when none does,
+run a local `miden-node` from that line and point the demo at it. If you upgraded from
+an older checkout, wipe stale local state first (`store.sqlite3`,
+`~/.guardian`): state from a previous Miden line does not load (see
+[`MIDEN_COMPATIBILITY.md`](./MIDEN_COMPATIBILITY.md#data-resets)). See
+[`docs/LOCAL_DEV.md`](./LOCAL_DEV.md#prerequisites) if your network
 choice differs.
 
 ## Where to next

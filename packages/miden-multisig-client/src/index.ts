@@ -49,22 +49,55 @@ export {
   type MultisigClientConfig,
   type RecoveredAccount,
 } from './client.js';
+export type {
+  TransportRecoveryReport,
+  TransportRecoveryStatus,
+} from './recovery/transportDrain.js';
 export type { ProverConfig, ProverRetryPolicy } from './prover/config.js';
 export type { RpcConfig, RpcRetryPolicy } from './rpc/config.js';
 export { lookupAuthDigest } from './lookupAuth.js';
-export { Multisig, type AccountState } from './multisig.js';
+export {
+  Multisig,
+  type AccountState,
+  type CreateProposalOptions,
+  type CreateSignerProposalOptions,
+  type CreateP2idProposalOptions,
+} from './multisig.js';
 export { AccountInspector, type DetectedMultisigConfig, type VaultBalance } from './inspector.js';
 export {
+  chainAnchorFromBase64,
+  chainAnchorToBase64,
+  chainAnchorBlockNum,
   executeForSummary,
+  executeForSummaryAt,
+  summaryApprovalExpirationBlockNum,
+  summarySalt,
+  SummaryAnchorMismatchError,
   buildUpdateSignersTransactionRequest,
   buildUpdateProcedureThresholdTransactionRequest,
   buildUpdateGuardianTransactionRequest,
   buildConsumeNotesTransactionRequest,
+  buildConsumeNotesTransactionRequestFromNotes,
   buildP2idTransactionRequest,
+  requestBoundBlockNum,
+  requestSaltHex,
+  MAX_APPROVAL_EXPIRATION_DELTA,
   parseP2idNoteType,
   p2idNoteTypeToMetadata,
   type P2idTransactionOptions,
+  type P2ideHeightOptions,
 } from './transaction.js';
+// Commitment derivation for hand-rolled export/import flows (issue #433):
+// the proposal id is the tx summary's commitment, recomputed from the
+// serialized summary exactly as import verification does. Returns normalized
+// hex, directly comparable to `ExportedProposal.commitment` / `Proposal.id`.
+export { computeCommitmentFromTxSummary } from './multisig/helpers.js';
+export type {
+  MidenClientMultisigRequestOptions,
+  MidenClientSignatureOptions,
+  MultisigRequestOptions,
+  SignatureOptions,
+} from './transaction/options.js';
 
 export { GuardianHttpClient, GuardianHttpError } from '@openzeppelin/guardian-client';
 export type { GuardianErrorMeta } from '@openzeppelin/guardian-client';
@@ -76,10 +109,39 @@ export {
   normalizeGuardianErrorCode,
 } from '@openzeppelin/guardian-client';
 export type { GuardianErrorCode } from '@openzeppelin/guardian-client';
+export type {
+  HistoryDecodeSection,
+  HistoryDecodeWarning,
+  HistoryEntry,
+  HistoryEntryStatus,
+  HistoryNote,
+  HistoryNoteAsset,
+  HistoryNoteTag,
+  HistoryNoteVisibility,
+  HistoryOptions,
+  HistoryPage,
+} from '@openzeppelin/guardian-client';
 
 // Codeless transport-failure classification (feature 009, User Story 3).
 export { isLikelyNetworkError, toUserFacingError } from './connectivity.js';
 export type { ConnectivityCategory, UserFacingError } from './connectivity.js';
+
+// The wallet-facing recovery flow (`Multisig.recoverNotes`) and its report
+// types. The individual strategies are internal — the flow is the one entry
+// point, so callers cannot accidentally skip the required context (tracked
+// account, synced store) or the final verifying sync.
+export type {
+  NoteImportOutcome,
+  NoteImportSource,
+  NoteImportStatus,
+} from './recovery/proposalNoteImport.js';
+export type { BlockRange, PublicBackfillReport } from './recovery/publicNoteBackfill.js';
+export type {
+  NoteRecoveryReport,
+  RecoverNotesOptions,
+  RecoveryStep,
+  RecoveryStepProblem,
+} from './recovery/recoverNotes.js';
 
 export {
   FalconSigner,
@@ -107,8 +169,12 @@ export {
   MAX_CONSUME_NOTES_METADATA_BYTES,
   isConsumeNotesV1,
   isConsumeNotesV2,
+  isProposalActionable,
+  type ProposalVerification,
   isP2idNoteVisibility,
   type P2idNoteVisibility,
+  MAX_P2IDE_BLOCK_HEIGHT,
+  parseP2ideHeight,
 } from './types/proposal.js';
 
 export {
@@ -121,7 +187,14 @@ export {
   UnsupportedMetadataVersionError,
   ConsumeNotesMetadataOversizeError,
   LegacyConsumeNotesNoteMissingError,
+  ConsumeNoteNotAuthenticatedError,
 } from './multisig/consumeNotesErrors.js';
+
+export {
+  type AuthArgErrorCode,
+  MultisigAuthArgsMissingError,
+  ProposalSaltMalformedError,
+} from './multisig/authArgErrors.js';
 
 export {
   noteToBase64,

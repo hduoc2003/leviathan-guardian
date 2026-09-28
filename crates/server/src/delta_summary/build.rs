@@ -146,7 +146,7 @@ mod tests {
     use crate::testing::helpers::create_test_delta_payload;
     use serde_json::json;
 
-    const TEST_ACCOUNT_ID_HEX: &str = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
+    const TEST_ACCOUNT_ID_HEX: &str = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
 
     fn synthetic_proposal_payload(metadata: Value) -> Value {
         json!({
@@ -240,41 +240,43 @@ mod tests {
     fn build_with_consume_notes_and_input_note_surfaces_asset_on_listing() {
         use guardian_shared::ToJson;
         use miden_protocol::account::AccountId;
-        use miden_protocol::account::delta::{
-            AccountDelta, AccountStorageDelta, AccountVaultDelta,
-        };
+        use miden_protocol::account::delta::{AccountDelta, AccountVaultDelta};
         use miden_protocol::asset::FungibleAsset;
         use miden_protocol::crypto::rand::RandomCoin;
         use miden_protocol::note::NoteType;
         use miden_protocol::transaction::InputNote;
-        use miden_protocol::transaction::{InputNotes, RawOutputNotes, TransactionSummary};
+        use miden_protocol::transaction::{
+            InputNotes, RawOutputNotes, TransactionSummary, TransactionSummaryUserParams,
+        };
         use miden_protocol::{Felt, Word, ZERO};
         use miden_standards::note::P2idNote;
 
-        const CONSUMER: &str = "0x2e2e2e2e2e2e2e902e2e2e2e2e2e2e";
-        const NOTE_SENDER: &str = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b";
-        const FAUCET: &str = "0x3f3f3f3e3f3f3f203f3f3f3f3f3f3f";
+        const CONSUMER: &str = "0x2e2e2e2e2e2e2e012e2e2e2e2e2e2e";
+        const NOTE_SENDER: &str = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
+        const FAUCET: &str = "0x3f3f3f3e3f3f3f013f3f3f3f3f3f3f";
 
         let sender = AccountId::from_hex(NOTE_SENDER).expect("sender");
         let consumer = AccountId::from_hex(CONSUMER).expect("consumer");
         let faucet = AccountId::from_hex(FAUCET).expect("faucet");
-        let asset = FungibleAsset::new(faucet, 100_000_000)
+        let asset: miden_protocol::asset::Asset = FungibleAsset::new(faucet, 100_000_000)
             .expect("fungible asset")
             .into();
         let mut rng = RandomCoin::new(Word::from([9u32, 8, 7, 6]));
-        let note = P2idNote::create(
-            sender,
-            consumer,
-            vec![asset],
-            NoteType::Public,
-            Default::default(),
-            &mut rng,
-        )
-        .expect("p2id note");
+        let note = miden_protocol::note::Note::from(
+            P2idNote::builder()
+                .sender(sender)
+                .target(consumer)
+                .assets(vec![asset])
+                .note_type(NoteType::Public)
+                .generate_serial_number(&mut rng)
+                .build()
+                .expect("p2id note"),
+        );
         let delta = AccountDelta::new(
             consumer,
-            AccountStorageDelta::default(),
+            miden_protocol::account::AccountStoragePatch::default(),
             AccountVaultDelta::default(),
+            None,
             Felt::ZERO,
         )
         .expect("account delta");
@@ -282,7 +284,10 @@ mod tests {
             delta,
             InputNotes::new(vec![InputNote::unauthenticated(note)]).expect("inputs"),
             RawOutputNotes::new(Vec::new()).expect("outputs"),
+            miden_protocol::block::BlockNumber::from(0),
             Word::from([ZERO; 4]),
+            0,
+            TransactionSummaryUserParams::new([ZERO; 6]),
         );
         let delta_payload = summary.to_json();
         let proposal_payload = synthetic_proposal_payload(json!({

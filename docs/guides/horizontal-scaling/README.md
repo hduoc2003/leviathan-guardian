@@ -45,13 +45,14 @@ Guardian identity — see [What is shared](#what-is-shared-and-why)). The files
 must be owner-only or the server refuses to start:
 
 ```sh
-mkdir -p ack-keys
-cargo run --quiet -p guardian-server --bin ack-keygen \
-  | { read -r json; \
-      jq -rj '.falcon_secret_key' <<<"$json" > ack-keys/ack-falcon-secret-key; \
-      jq -rj '.ecdsa_secret_key'  <<<"$json" > ack-keys/ack-ecdsa-secret-key; }
-chmod 600 ack-keys/ack-falcon-secret-key ack-keys/ack-ecdsa-secret-key
+cargo run --quiet -p guardian-server --bin ack-keygen -- --out-dir ack-keys
 ```
+
+(`ack-keygen` writes both files as `0600` and refuses to overwrite existing
+ones. Images later than `v0.17.0` also ship it, so with such a tag pinned in
+`.env` you can run it from the image instead:
+`docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/ack-keys:/out"
+ghcr.io/openzeppelin/guardian:<tag> /app/ack-keygen --out-dir /out`.)
 
 `ack-keys/` is git-ignored. Treat it like any private key material — and note
 that regenerating it changes the Guardian's identity, freezing any multisig
@@ -91,7 +92,7 @@ directly on `:50052` (A) and `:50053` (B).
 | Operator/EVM sessions | `auth_sessions` | Log in on A, your cookie works on B; logout is honored fleet-wide. |
 | Login challenges | `auth_challenges` | A challenge is single-use even if issued on A and verified on B. |
 | Canonicalization lease | `worker_leases` | Exactly one replica promotes candidates; the others stand by. |
-| Replay protection | `account_auth_state` | A request timestamp accepted on A cannot be replayed to B; each per-account timestamp is usable exactly once fleet-wide. |
+| Replay protection | `account_auth_state` | A request timestamp accepted on A cannot be replayed to B; each per-account-and-signer timestamp is usable exactly once fleet-wide. A retained migration floor also protects signers first authorized after an account-scoped upgrade. |
 
 Coordination is **backend-derived**: it is on because the backend is Postgres.
 No environment variable enables or disables it.
@@ -283,7 +284,7 @@ ways that do not change the coordination behavior shown above:
 - **`GUARDIAN_ENV=prod`** activates the prod-stage startup guards — a filesystem
   storage backend and a rate limit that partitions to 0 req/replica are each
   refused at startup. (An unset `GUARDIAN_DASHBOARD_CURSOR_SECRET` only *warns* —
-  it degrades cross-replica dashboard pagination, not custody, so a
+  it degrades cross-replica pagination on the dashboard feeds and the client `/delta/history` endpoint, not custody, so a
   single-replica prod server still boots.) Note these guards live behind the ACK
   registry init, which in prod requires AWS first: set `GUARDIAN_ENV=prod`
   without `AWS_REGION` and the server refuses to start with `AWS_REGION is

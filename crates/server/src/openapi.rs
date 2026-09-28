@@ -41,6 +41,14 @@ pub struct ApiErrorMeta {
     /// Pause reason. Present only for `GUARDIAN_ACCOUNT_PAUSED`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paused_reason: Option<String>,
+    /// Rejected signature scheme. Present only for
+    /// `signature_scheme_not_allowed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// Signature schemes this Guardian accepts for new accounts. Present
+    /// only for `signature_scheme_not_allowed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_schemes: Option<Vec<String>>,
     /// RFC 3339 timestamp of the guardian-switch release. Present only
     /// for `GUARDIAN_ACCOUNT_RELEASED`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,10 +198,12 @@ impl Modify for CommonResponsesAddon {
         crate::api::http::push_delta,
         crate::api::http::get_delta,
         crate::api::http::get_delta_since,
+        crate::api::http::get_delta_history,
         crate::api::http::get_state,
         crate::api::http::lookup,
         crate::api::http::get_pubkey,
         crate::api::http::status,
+        crate::api::http::status_root,
         crate::api::http::push_delta_proposal,
         crate::api::http::get_delta_proposals,
         crate::api::http::get_delta_proposal,
@@ -220,6 +230,8 @@ pub struct ClientApiDoc;
         crate::api::dashboard::logout_operator,
         crate::api::dashboard::list_operator_accounts,
         crate::api::dashboard::get_dashboard_info_handler,
+        crate::api::dashboard::get_dashboard_stats_handler,
+        crate::api::dashboard::request_dashboard_stats_refresh_handler,
         crate::api::dashboard::get_dashboard_session_handler,
         crate::api::dashboard::get_operator_account,
         crate::api::dashboard::get_operator_account_snapshot,
@@ -326,6 +338,7 @@ mod tests {
         let paths = json["paths"].as_object().expect("paths object");
         assert!(paths.contains_key("/configure"), "client API path missing");
         assert!(paths.contains_key("/delta"), "client API path missing");
+        assert!(paths.contains_key("/"), "root status alias missing");
         assert!(
             paths.contains_key("/dashboard/accounts"),
             "dashboard API path missing"
@@ -370,6 +383,40 @@ mod tests {
         assert!(
             json["paths"]["/pubkey"]["get"].get("security").is_none(),
             "/pubkey should be public"
+        );
+        assert!(
+            json["paths"]["/"]["get"].get("security").is_none(),
+            "root status alias should be public"
+        );
+    }
+
+    fn strip_prose(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter()
+                    .filter(|(key, _)| {
+                        !matches!(key.as_str(), "description" | "summary" | "operationId")
+                    })
+                    .map(|(key, val)| (key.clone(), strip_prose(val)))
+                    .collect(),
+            ),
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(strip_prose).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+
+    #[test]
+    fn root_alias_operation_matches_status() {
+        let json = serde_json::to_value(openapi()).expect("spec serializes to JSON");
+        let root = strip_prose(&json["paths"]["/"]["get"]);
+        let status = strip_prose(&json["paths"]["/status"]["get"]);
+
+        assert_eq!(
+            root, status,
+            "GET / is an alias of GET /status: their documented contracts must \
+             agree on parameters, security, response codes, and body schemas"
         );
     }
 

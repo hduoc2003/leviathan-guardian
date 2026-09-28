@@ -1,23 +1,34 @@
 //! Transaction building and execution for multisig operations.
 
+mod auth_args;
 mod builder;
 mod configuration;
 mod consume;
 mod guardian;
 mod payment;
 
-pub use builder::ProposalBuilder;
+pub use auth_args::{
+    MAX_APPROVAL_EXPIRATION_DELTA, TransactionRequestBuilderExt, multisig_auth_args,
+    proposal_auth_args, proposer_auth_args, summary_approval_expiration_block_num, summary_salt,
+    synced_fee_faucet_id,
+};
+pub use builder::{ProposalBuilder, ProposalOptions};
 pub use configuration::{
     build_update_procedure_threshold_transaction_request, build_update_signers_transaction_request,
 };
+pub(crate) use consume::ensure_notes_authenticated;
 pub use consume::{
     build_consume_notes_transaction_request, build_consume_notes_transaction_request_from_notes,
 };
 pub use guardian::build_update_guardian_transaction_request;
 pub use payment::build_p2id_transaction_request;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use miden_client::ClientError;
-use miden_client::transaction::{TransactionExecutorError, TransactionRequest, TransactionSummary};
+use miden_client::transaction::{
+    ChainAnchor, TransactionExecutorError, TransactionRequest, TransactionSummary,
+};
 use miden_protocol::account::AccountId;
 use miden_protocol::{Felt, Word};
 
@@ -33,13 +44,69 @@ pub fn deserialize_transaction_request(bytes: &[u8]) -> Result<TransactionReques
     })
 }
 
-/// Executes a transaction to get its summary (expects Unauthorized error).
+/// Serializes a [`ChainAnchor`] to base64 for the proposal wire payload.
+pub fn chain_anchor_to_base64(anchor: &ChainAnchor) -> String {
+    use miden_client::Serializable;
+    BASE64.encode(anchor.to_bytes())
+}
+
+/// Deserializes a [`ChainAnchor`] from its base64 wire form. `ChainAnchor`
+/// deserialization validates the header/chain consistency internally, so a
+/// decoded anchor only needs its block commitment checked against the signed
+/// transaction summary before it is safe to execute against.
+pub fn chain_anchor_from_base64(anchor_b64: &str) -> Result<ChainAnchor> {
+    use miden_client::Deserializable;
+    let bytes = BASE64
+        .decode(anchor_b64)
+        .map_err(|e| MultisigError::InvalidConfig(format!("invalid chain_anchor base64: {e}")))?;
+    ChainAnchor::read_from_bytes(&bytes)
+        .map_err(|e| MultisigError::InvalidConfig(format!("invalid chain_anchor: {e}")))
+}
+
+/// Captures a [`ChainAnchor`] for the request at the current sync height and
+/// executes the transaction against it to get its summary (expects the
+/// Unauthorized error). The anchor is returned alongside the summary so the
+/// proposer can ship it with the signed data; cosigners and the executor then
+/// reproduce the summary with [`execute_for_summary_at`] regardless of their
+/// own sync height.
+///
+/// The request's auth args bind the block its summary commits to, and this
+/// crate pins that block to the anchor: a proposer builds at the sync height
+/// the anchor is captured at, and a rebuild passes the anchor's block number.
+/// A sync landing between the build and the capture leaves the two one block
+/// apart, which every cosigner's anchor check would then fail on; it is caught
+/// here, before the proposal is pushed, so the proposer rebuilds instead.
 pub async fn execute_for_summary(
     client: &mut MidenSdkClient,
     account_id: AccountId,
     request: TransactionRequest,
+) -> Result<(TransactionSummary, ChainAnchor)> {
+    let anchor = client
+        .chain_anchor_for_request(&request)
+        .await
+        .map_err(|e| MultisigError::MidenClient(format!("failed to capture chain anchor: {e}")))?;
+    let summary = execute_for_summary_at(client, account_id, request, anchor.clone()).await?;
+    if anchor.block_commitment() != summary.block_commitment() {
+        return Err(MultisigError::SummaryAnchorMismatch {
+            anchor_commitment: word_to_hex(&anchor.block_commitment()),
+            summary_block_commitment: word_to_hex(&summary.block_commitment()),
+        });
+    }
+    Ok((summary, anchor))
+}
+
+/// Executes a transaction at the given [`ChainAnchor`]'s reference block to
+/// get its summary (expects Unauthorized error).
+pub async fn execute_for_summary_at(
+    client: &mut MidenSdkClient,
+    account_id: AccountId,
+    request: TransactionRequest,
+    anchor: ChainAnchor,
 ) -> Result<TransactionSummary> {
-    match client.execute_transaction(account_id, request).await {
+    match client
+        .execute_transaction_at(account_id, request, anchor)
+        .await
+    {
         Ok(_) => Err(MultisigError::UnexpectedSuccess),
         Err(ClientError::TransactionExecutorError(TransactionExecutorError::Unauthorized(
             summary,
@@ -54,7 +121,7 @@ pub async fn execute_for_summary(
 /// Generates a random salt word.
 pub fn generate_salt() -> Word {
     let mut bytes = [0u8; 32];
-    rand::Rng::fill(&mut rand::rng(), &mut bytes);
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut bytes);
 
     let mut felts = [Felt::ZERO; 4];
     for (i, chunk) in bytes.chunks(8).enumerate() {
@@ -98,17 +165,14 @@ mod tests {
         );
     }
 
-    /// Guards against silent transaction-kernel drift: the kernel commitment depends on transitive
-    /// hashing crates (notably Plonky3 `p3-*`), so a stale `Cargo.lock` yields a kernel the node
-    /// rejects with "value for key ... not present in the advice map". This constant must equal the
-    /// live network's "Proof Commitment"; if the test fails after a dependency bump, realign the
-    /// crates (`cargo update`) and update the constant together.
+    /// Guards the locally assembled transaction kernel against network drift.
+    /// Dependency changes must preserve the live network's proof commitment.
     #[test]
     fn transaction_kernel_commitment_matches_network() {
         use miden_protocol::transaction::TransactionKernel;
 
         const EXPECTED_KERNEL_COMMITMENT: &str =
-            "0x79642e8d55eaa545b2dd8120dfe44ba30c67e5a2c83379b4aeb8974a78e3d7a6";
+            "0xe93c448e6c1f553b5e254f4a45abd5088ef11bb01d5ff2797b2d25dc75ded39f";
 
         let actual = word_to_hex(&TransactionKernel.to_commitment());
         assert_eq!(

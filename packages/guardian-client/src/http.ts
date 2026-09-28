@@ -11,6 +11,8 @@ import type {
   DeltaProposalRequest,
   DeltaProposalResponse,
   ExecutionDelta,
+  HistoryOptions,
+  HistoryPage,
   LookupResponse,
   PubkeyResponse,
   PushDeltaResponse,
@@ -26,6 +28,7 @@ import type {
   ServerAbandonCandidateResponse,
   ServerDeltaObject,
   ServerDeltaProposalResponse,
+  ServerHistoryPage,
   ServerLookupResponse,
   ServerProposalsResponse,
   ServerPubkeyResponse,
@@ -37,6 +40,7 @@ import type {
 import {
   fromServerConfigureResponse,
   fromServerDeltaObject,
+  fromServerHistoryPage,
   fromServerLookupResponse,
   fromServerStateObject,
   toServerConfigureRequest,
@@ -56,6 +60,17 @@ export interface GuardianErrorMeta {
   pausedAt?: string;
   pausedReason?: string | null;
   releasedAt?: string;
+  /**
+   * Signature scheme the server refused for a new account registration.
+   * Present only when `code === 'signature_scheme_not_allowed'`.
+   */
+  scheme?: string;
+  /**
+   * Schemes this Guardian accepts for new accounts
+   * (`GUARDIAN_ALLOWED_ACCOUNT_SCHEMES`). Present only when
+   * `code === 'signature_scheme_not_allowed'`.
+   */
+  allowedSchemes?: string[];
 }
 
 interface ParsedGuardianError {
@@ -107,6 +122,13 @@ function parseGuardianErrorBody(body: string): ParsedGuardianError | undefined {
   }
   if (typeof rawMeta.paused_at === 'string') meta.pausedAt = rawMeta.paused_at;
   if (typeof rawMeta.released_at === 'string') meta.releasedAt = rawMeta.released_at;
+  if (typeof rawMeta.scheme === 'string') meta.scheme = rawMeta.scheme;
+  if (
+    Array.isArray(rawMeta.allowed_schemes) &&
+    rawMeta.allowed_schemes.every((x): x is string => typeof x === 'string')
+  ) {
+    meta.allowedSchemes = rawMeta.allowed_schemes;
+  }
   if (typeof rawMeta.paused_reason === 'string' || rawMeta.paused_reason === null) {
     meta.pausedReason = rawMeta.paused_reason as string | null;
   }
@@ -117,21 +139,6 @@ function parseGuardianErrorBody(body: string): ParsedGuardianError | undefined {
  * Error thrown by the GUARDIAN HTTP client. Parses the `{ code, message, meta }`
  * error body (feature 009): branch on {@link code}, display {@link userMessage}.
  */
-/**
- * The request never got an answer: DNS, TLS, a refused or dropped connection, an
- * abort. Raised where the failure happens so no consumer has to infer transport
- * from a runtime's error text, which differs across browsers, undici and Deno.
- */
-export class GuardianTransportError extends Error {
-  readonly url: string;
-
-  constructor(url: string, cause: unknown) {
-    super(`Could not reach Guardian at ${url}`, { cause });
-    this.name = 'GuardianTransportError';
-    this.url = url;
-  }
-}
-
 export class GuardianHttpError extends Error {
   /**
    * Typed, compiler-checked Guardian error code (issue #318), normalized to
@@ -467,20 +474,42 @@ export class GuardianHttpClient {
     return fromServerDeltaObject(server);
   }
 
+  /**
+   * Fetch one page of the account's canonical delta history
+   * (issue #413), newest-first by nonce, with decoded input/output
+   * note summaries. Pass `options.cursor` from a previous page's
+   * `nextCursor` to resume; an absent `nextCursor` on the result means
+   * the feed is exhausted. Read-only: served while the account is
+   * paused. Only transactions pushed through Guardian appear.
+   */
+  async getDeltaHistory(accountId: string, options: HistoryOptions = {}): Promise<HistoryPage> {
+    // Signed payload and query string must carry the same values: the
+    // server signs the canonical JSON of its query struct, where limit
+    // stays a string and omitted parameters are omitted keys.
+    const requestPayload: Record<string, string> = { account_id: accountId };
+    if (options.limit !== undefined) {
+      requestPayload.limit = options.limit.toString();
+    }
+    if (options.cursor !== undefined) {
+      requestPayload.cursor = options.cursor;
+    }
+    const params = new URLSearchParams(requestPayload);
+    const response = await this.fetchAuthenticated(`/delta/history?${params}`, {
+      method: 'GET',
+    }, accountId, requestPayload);
+    const server = (await response.json()) as ServerHistoryPage;
+    return fromServerHistoryPage(server);
+  }
+
   private async fetch(path: string, init: RequestInit): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        ...init,
-        headers: {
-          'Content-Type': 'application/json',
-          ...init.headers,
-        },
-      });
-    } catch (error) {
-      throw new GuardianTransportError(url, error);
-    }
+    const response = await fetch(url, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...init.headers,
+      },
+    });
 
     if (!response.ok) {
       const body = await response.text();
@@ -562,15 +591,16 @@ export class GuardianHttpClient {
         },
       });
     } catch (err) {
-      // Replay rejections (stale timestamp) are transient: retry once with a
-      // fresh timestamp. The specific "Replay attack" detail is now sanitized
-      // off the wire (feature 009), so branch on the stable auth code instead.
-      // Retrying a genuine auth failure is harmless — one extra attempt that
-      // also fails — and only happens when a retry budget remains.
+      // Replay rejections are transient: the request was correctly signed
+      // but lost the server's per-signer timestamp CAS. Retry with a fresh
+      // timestamp and signature, branching only on the dedicated
+      // `authentication_replay` code (issue #367); terminal authentication
+      // failures (invalid signature, clock outside the skew window) are
+      // never retried.
       if (
         retries > 0 &&
         err instanceof GuardianHttpError &&
-        err.code === 'authentication_failed'
+        err.code === 'authentication_replay'
       ) {
         await new Promise((resolve) => setTimeout(resolve, 50));
         return this.fetchAuthenticated(path, init, accountId, requestPayload, retries - 1);

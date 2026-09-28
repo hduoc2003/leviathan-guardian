@@ -8,6 +8,14 @@
 
 Warning: This is a work in progress.
 
+> **Miden version baseline**: the Rust workspace and the TypeScript
+> multisig SDK both track the stable Miden **v0.16 line** with exact pins
+> (`miden-client` 0.16.0, `miden-protocol` / `miden-standards` 0.16.1,
+> `@miden-sdk/miden-sdk` 0.16.0). Run against a node on protocol 0.16.
+> Accounts, local stores, and networks from v0.15 do not interoperate
+> with v0.16 — see [Troubleshooting](docs/TROUBLESHOOTING.md) and
+> [Miden compatibility](docs/MIDEN_COMPATIBILITY.md).
+
 ### Documentation
 
 - [`docs/`](docs/README.md) — in-repo documentation hub. Start with
@@ -156,18 +164,26 @@ cargo test -p guardian-server --features integration
 cargo test -p guardian-server --features e2e
 ```
 
+Postgres-backed tests stay `#[ignore]` and need a live database, so they run
+through their own script:
+
+```bash
+POSTGRES_PASSWORD=guardian docker compose -f docker-compose.postgres.yml up -d postgres
+./scripts/test-postgres.sh
+```
+
+See [LOCAL_DEV.md](./docs/LOCAL_DEV.md#postgres-backed-tests) for the reset and
+safety behaviour.
+
 #### TypeScript Tests
 
 ```bash
-# Install dependencies
-cd packages/guardian-client && npm install
-cd packages/guardian-evm-client && npm install
-cd packages/guardian-operator-client && npm install
-cd packages/miden-multisig-client && npm install
+cd packages
+npm ci
 
-# Run tests
-cd packages/guardian-client && npm test
-cd packages/guardian-evm-client && npm test
-cd packages/guardian-operator-client && npm test
-cd packages/miden-multisig-client && npm test
+npm test -w @openzeppelin/guardian-client
+npm test -w @openzeppelin/guardian-evm-client
+npm test -w @openzeppelin/guardian-operator-client
+npm run build -w @openzeppelin/guardian-client
+npm test -w @openzeppelin/miden-multisig-client
 ```

@@ -33,15 +33,16 @@ use miden_client::account::Account;
 use miden_confidential_contracts::multisig_guardian::{
     MultisigGuardianBuilder, MultisigGuardianConfig,
 };
-use miden_protocol::account::delta::{AccountStorageDelta, AccountVaultDelta};
-use miden_protocol::account::{AccountDelta, StorageMapKey, StorageSlotName};
+use miden_protocol::account::delta::AccountVaultDelta;
+use miden_protocol::account::{AccountDelta, AccountStoragePatch, StorageMapKey, StorageSlotName};
 use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
-use miden_protocol::transaction::{InputNotes, RawOutputNotes, TransactionSummary};
+use miden_protocol::transaction::{
+    InputNotes, RawOutputNotes, TransactionSummary, TransactionSummaryUserParams,
+};
 use miden_protocol::{Felt, Word as MidenWord, ZERO};
+use miden_standards::account::auth::AuthGuardedMultisig;
 use std::hint::black_box;
 use std::time::Instant;
-
-const EXECUTED_TXS_SLOT: &str = "openzeppelin::multisig::executed_transactions";
 
 const WARMUP_ITERS: usize = 25;
 const MEASURED_ITERS: usize = 200;
@@ -79,7 +80,7 @@ fn build_account(cosigners: usize, executed_txs: usize) -> Account {
         .build_existing()
         .expect("build existing multisig-guardian account");
 
-    let executed_txs_name = StorageSlotName::new(EXECUTED_TXS_SLOT).expect("valid slot name");
+    let executed_txs_name = AuthGuardedMultisig::executed_transactions_slot().clone();
     for i in 0..executed_txs {
         seed_replay_entry(&mut account, &executed_txs_name, i as u64);
     }
@@ -87,13 +88,18 @@ fn build_account(cosigners: usize, executed_txs: usize) -> Account {
 }
 
 fn seed_replay_entry(account: &mut Account, slot: &StorageSlotName, i: u64) {
-    let key = MidenWord::from([Felt::new(i), Felt::new(0x5eed), ZERO, ZERO]);
+    let key = MidenWord::from([
+        Felt::new_unchecked(i),
+        Felt::new_unchecked(0x5eed),
+        ZERO,
+        ZERO,
+    ]);
     account
         .storage_mut()
         .set_map_item(
             slot,
             StorageMapKey::new(key),
-            MidenWord::from([Felt::new(1), ZERO, ZERO, ZERO]),
+            MidenWord::from([Felt::new_unchecked(1), ZERO, ZERO, ZERO]),
         )
         .expect("seed replay-map entry");
 }
@@ -102,29 +108,29 @@ fn seed_replay_entry(account: &mut Account, slot: &StorageSlotName, i: u64) {
 /// insert is the per-transaction minimum; many inserts model the largest delta
 /// the body limit accepts.
 fn build_partial_delta(account: &Account, entries: usize) -> serde_json::Value {
-    let executed_txs_name = StorageSlotName::new(EXECUTED_TXS_SLOT).expect("valid slot name");
-    let mut storage_delta = AccountStorageDelta::default();
-    for i in 0..entries.max(1) {
+    let executed_txs_name = AuthGuardedMultisig::executed_transactions_slot().clone();
+    let map_entries = (0..entries.max(1)).map(|i| {
         let key = MidenWord::from([
-            Felt::new(0xdead_0000 + i as u64),
-            Felt::new(0xbeef),
+            Felt::new_unchecked(0xdead_0000 + i as u64),
+            Felt::new_unchecked(0xbeef),
             ZERO,
             ZERO,
         ]);
-        storage_delta
-            .set_map_item(
-                executed_txs_name.clone(),
-                StorageMapKey::new(key),
-                MidenWord::from([Felt::new(1), ZERO, ZERO, ZERO]),
-            )
-            .expect("set delta replay entry");
-    }
+        (
+            StorageMapKey::new(key),
+            MidenWord::from([Felt::new_unchecked(1), ZERO, ZERO, ZERO]),
+        )
+    });
+    let storage_patch = AccountStoragePatch::builder()
+        .update_map(executed_txs_name, map_entries)
+        .build();
 
     let delta = AccountDelta::new(
         account.id(),
-        storage_delta,
+        storage_patch,
         AccountVaultDelta::default(),
-        Felt::new(1),
+        None,
+        Felt::new_unchecked(1),
     )
     .expect("build account delta");
 
@@ -137,12 +143,12 @@ fn build_partial_delta(account: &Account, entries: usize) -> serde_json::Value {
 fn build_full_state_delta(account: &Account) -> serde_json::Value {
     let delta = AccountDelta::new(
         account.id(),
-        AccountStorageDelta::default(),
+        AccountStoragePatch::default(),
         AccountVaultDelta::default(),
-        Felt::new(1),
+        Some(account.code().clone()),
+        Felt::new_unchecked(1),
     )
-    .expect("build account delta")
-    .with_code(Some(account.code().clone()));
+    .expect("build account delta");
     assert!(delta.is_full_state(), "delta must be a full-state delta");
     tx_summary_json(delta)
 }
@@ -152,7 +158,10 @@ fn tx_summary_json(delta: AccountDelta) -> serde_json::Value {
         delta,
         InputNotes::new(Vec::new()).expect("input notes"),
         RawOutputNotes::new(Vec::new()).expect("output notes"),
+        miden_protocol::block::BlockNumber::from(0),
         MidenWord::from([ZERO; 4]),
+        0,
+        TransactionSummaryUserParams::new([ZERO; 6]),
     )
     .to_json()
 }

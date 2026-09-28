@@ -31,6 +31,16 @@ pub enum MultisigError {
     #[error("miden client error: {0}")]
     MidenClient(String),
 
+    #[error(
+        "the transaction summary binds block commitment {summary_block_commitment} but the \
+         captured chain anchor is {anchor_commitment}; a sync landed between building the \
+         request and capturing its anchor, so rebuild the request and retry"
+    )]
+    SummaryAnchorMismatch {
+        anchor_commitment: String,
+        summary_block_commitment: String,
+    },
+
     /// Miden client error retaining the concrete source and its RPC status.
     #[error("miden client error: {message}")]
     MidenClientSource {
@@ -110,6 +120,17 @@ pub enum MultisigError {
     #[error("account storage error: {0}")]
     AccountStorage(String),
 
+    /// The account's code was built from a different miden-standards contract
+    /// version than the one this SDK pins, so the SDK's procedure roots do not
+    /// apply to it.
+    #[error(
+        "unsupported contract version for account {account_id}: its code does not carry \
+         this SDK's pinned guarded-multisig auth procedure; use the SDK release matching \
+         the contract version the account was created with (see docs/MULTISIG_SDK.md, \
+         \"Contract version pinning\")"
+    )]
+    UnsupportedContractVersion { account_id: AccountId },
+
     /// Transaction unexpected success (expected Unauthorized).
     #[error("transaction executed successfully when failure was expected")]
     UnexpectedSuccess,
@@ -153,6 +174,13 @@ pub enum MultisigError {
     /// store does not contain the referenced note. Not reachable on v2.
     #[error("consume_notes legacy verification: note not found in local store: {note_id}")]
     LegacyConsumeNotesNoteMissing { note_id: NoteId },
+
+    /// consume_notes: a note the proposal consumes could not be authenticated
+    /// (its inclusion proof fetched from the node and imported into the local
+    /// store). The signed summary commits to authenticated consumption, so
+    /// an unauthenticated rebuild would never match it (issue #409).
+    #[error("consume_notes: note {note_id} could not be authenticated: {reason}")]
+    ConsumeNoteNotAuthenticated { note_id: NoteId, reason: String },
 }
 
 impl MultisigError {
@@ -167,6 +195,9 @@ impl MultisigError {
             }
             Self::ConsumeNotesMetadataOversize { .. } => Some("consume_notes_metadata_oversize"),
             Self::LegacyConsumeNotesNoteMissing { .. } => Some("consume_notes_legacy_note_missing"),
+            Self::ConsumeNoteNotAuthenticated { .. } => {
+                Some("consume_notes_note_not_authenticated")
+            }
             Self::UnsupportedTransactionType(_) => Some("unsupported_transaction_type"),
             _ => None,
         }
@@ -223,6 +254,10 @@ impl MultisigError {
 fn rpc_kind_from_client_error(error: &miden_client::ClientError) -> Option<&GrpcError> {
     match error {
         miden_client::ClientError::RpcError(error) => rpc_kind(error),
+        miden_client::ClientError::SubmissionOutcomeUnknown { source, .. } => rpc_kind(source),
+        miden_client::ClientError::ApplyTransactionAfterSubmitFailed { source, .. } => {
+            rpc_kind_from_client_error(source)
+        }
         _ => None,
     }
 }

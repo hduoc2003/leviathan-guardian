@@ -24,9 +24,9 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.15.0"
+version = "0.17.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.98.1"
 authors = ["OpenZeppelin"]
 license = "AGPL-3.0"
 repository = "https://github.com/OpenZeppelin/guardian"
@@ -38,6 +38,19 @@ strip = true           # Strip debug symbols for smaller, more reproducible bina
 lto = true            # Link-time optimization for better optimization and determinism
 codegen-units = 1     # Single codegen unit for maximum reproducibility
 incremental = false   # Disable incremental compilation for reproducibility
+
+# Dependencies — the crypto crates especially (Falcon, RPO, Merkle) — are an
+# order of magnitude slower at opt-level 0, which dominated test wall-clock
+# (the CI Test Suite spent ~14 of its 20 minutes executing tests). Build
+# dependencies optimized in dev/test/coverage builds; workspace crates keep
+# opt-level 0 for fast rebuilds, debugging, and coverage. Dependencies
+# compile once and stay cached, so the extra compile cost is paid rarely.
+[profile.dev.package."*"]
+opt-level = 3
+# No debuginfo for dependencies: nobody steps into them, and dep debuginfo at
+# opt-level 3 is the bulk of target-dir size — which matters because CI's
+# per-repo cache quota is 10GB across all jobs' target caches.
+debug = false
 
 [workspace.dependencies]
 # Core
@@ -52,9 +65,9 @@ tonic-prost = "0.14.2"
 thiserror = "2.0.9"
 hex = "0.4.3"
 base64 = "0.22"
-rand_chacha = "0.9.0"
+rand_chacha = "0.10"
 tempfile = "3.15.0"
-rand = "0.9"
+rand = "0.10"
 anyhow = { version = "1.0", features = ["backtrace", "std"] }
 assert_matches = "1.5"
 rstest = "0.26"
@@ -64,41 +77,66 @@ chrono = "0.4"
 # parameter inference for axum `Query`/`Path` extractors.
 utoipa = { version = "5", features = ["axum_extras"] }
 
-# Miden. Requirements stay at the `0.15` minor because the Leviathan forks
-# patched in below are versioned 0.15.0; a `0.15.3` floor would reject them.
-miden-protocol = "0.15"
-miden-standards = "0.15"
-miden-tx = "0.15"
-miden-node-proto ="0.15"
-miden-testing = "0.15"
-miden-client = "0.15"
-miden-client-sqlite-store = "0.15"
+# Miden 0.17 line: exact pins only. Must match the versions embedded in
+# the @miden-sdk/miden-sdk WASM build, or the two clients compute different
+# transaction summary commitments and auth procedure roots.
+miden-protocol = "=0.17.0-rc.6"
+miden-standards = "=0.17.0-rc.6"
+miden-tx = "=0.17.0-rc.6"
+miden-node-proto-build = { version = "=0.17.0-rc.2", default-features = false }
+miden-testing = "=0.17.0-rc.6"
+miden-client = "=0.17.0-rc.2"
+miden-client-sqlite-store = "=0.17.0-rc.2"
 
 [patch.crates-io]
-miden-crypto          = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
-miden-crypto-derive   = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
-miden-field           = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
-miden-serde-utils     = { git = "https://git.softly.com/leviathan/crypto", rev = "08a97016cd0c3224818f649cb3accc90b2db1936" }
-miden-air             = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-assembly        = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-assembly-syntax = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-core            = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-core-lib        = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-debug-types     = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-mast-package    = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-processor       = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-prover          = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-utils-sync      = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-verifier        = { git = "https://git.softly.com/leviathan/miden-vm", rev = "41a221d6108db757de3eae4d875fb785bda0acbe" }
-miden-block-prover    = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
-miden-protocol        = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
-miden-protocol-macros = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
-miden-standards       = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
-miden-testing         = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
-miden-tx              = { git = "https://git.softly.com/leviathan/protocol", rev = "c45ff79d297dbcc82166ef6e31624af0efb7c7e1" }
-miden-node-proto           = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
-miden-node-proto-build     = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
-miden-node-utils           = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
-miden-remote-prover-client = { git = "https://git.softly.com/leviathan/node", rev = "69ce75600bd4acca13dd27a727d91873939ec498" }
-miden-client              = { git = "https://git.softly.com/leviathan/miden-client", rev = "5ee909c28ca89840e9623a0fbb954be198ef0774" }
-miden-client-sqlite-store = { git = "https://git.softly.com/leviathan/miden-client", rev = "5ee909c28ca89840e9623a0fbb954be198ef0774" }
+miden-crypto           = { git = "https://git.softly.com/leviathan/crypto", rev = "da299fccf7f80b084a74c843137ff27af153582b" }
+miden-crypto-derive    = { git = "https://git.softly.com/leviathan/crypto", rev = "da299fccf7f80b084a74c843137ff27af153582b" }
+miden-field            = { git = "https://git.softly.com/leviathan/crypto", rev = "da299fccf7f80b084a74c843137ff27af153582b" }
+miden-lifted-air       = { git = "https://git.softly.com/leviathan/crypto", rev = "da299fccf7f80b084a74c843137ff27af153582b" }
+miden-lifted-stark     = { git = "https://git.softly.com/leviathan/crypto", rev = "da299fccf7f80b084a74c843137ff27af153582b" }
+miden-serde-utils      = { git = "https://git.softly.com/leviathan/crypto", rev = "da299fccf7f80b084a74c843137ff27af153582b" }
+miden-stark-transcript = { git = "https://git.softly.com/leviathan/crypto", rev = "da299fccf7f80b084a74c843137ff27af153582b" }
+miden-stateful-hasher  = { git = "https://git.softly.com/leviathan/crypto", rev = "da299fccf7f80b084a74c843137ff27af153582b" }
+
+miden-ace-codegen          = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-air                  = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-assembly             = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-assembly-syntax      = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-assembly-syntax-cst  = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-constraint-compiler  = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-core                 = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-core-lib             = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-core-lib-codegen     = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-debug-types          = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-mast-package         = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-package-registry     = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-precompiles          = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-precompiles-air      = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-precompiles-prover   = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-precompiles-verifier = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-processor            = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-project              = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-prover               = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-utils-core-derive    = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-utils-diagnostics    = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-utils-indexing       = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-utils-sync           = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+miden-verifier             = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+midenc-hir-type            = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
+
+miden-agglayer             = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-block-prover         = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-objects              = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-protobuf             = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-protobuf-derive      = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-protocol             = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-protocol-build-utils = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-standards            = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-testing              = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-tx                   = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-tx-batch             = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+
+miden-node-proto-build = { git = "https://git.softly.com/leviathan/node", rev = "3687a33e99312c269ca869c5cbd07eadc3f462f0" }
+
+miden-client              = { git = "https://git.softly.com/leviathan/leviathan-client", rev = "96280774e1d99b4edf77fb73140085d94fcc69bc" }
+miden-client-sqlite-store = { git = "https://git.softly.com/leviathan/leviathan-client", rev = "96280774e1d99b4edf77fb73140085d94fcc69bc" }

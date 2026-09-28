@@ -103,6 +103,51 @@ if (info.serviceStatus === 'degraded') {
 }
 ```
 
+### Aggregate Stats (Assets Under Guard)
+
+One request replaces the full account-list walk plus per-account
+snapshot reads (issue #371). The server maintains the aggregate in the
+background; `asOf` tells you how old it is.
+
+```typescript
+const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+const stats = await client.getDashboardStats({ updatedSince: sevenDaysAgo });
+
+console.log(stats.asOf, stats.accounts.total, stats.accounts.byLifecycle);
+console.log(stats.accounts.updatedWithin7d, stats.accounts.byAuthMethod);
+for (const shape of stats.accounts.byAuthMethodAndSignerCount) {
+  console.log(shape.authMethod, shape.authorizedSignerCount, shape.count);
+}
+
+// Asset totals cover Miden accounts whose metadata `updatedAt` is on or
+// after `updatedSince`; account counts are always unfiltered.
+for (const total of stats.assets.fungible) {
+  console.log(total.faucetId, BigInt(total.totalAmount)); // base units, may exceed 2^53
+}
+if (!stats.assets.complete) {
+  console.warn('partial coverage:', stats.assets.covered, 'of', stats.assets.eligible, stats.assets.skipped);
+}
+```
+
+The aggregate is one snapshot per fleet: the holder of the `dashboard_stats`
+lease walks the inventory every `GUARDIAN_DASHBOARD_STATS_REFRESH_INTERVAL_SECS`
+(300 s by default) and every replica serves the same `version`. Until the first
+publication the call throws a `GuardianOperatorHttpError` with code
+`data_unavailable` (503, retryable); a malformed `updatedSince` yields
+`invalid_timestamp` (400). `asOf` is the only truthful age signal — a slow or
+failed walk keeps the previous publication.
+
+Operators holding `stats:refresh` can ask for an out-of-cycle walk:
+
+```typescript
+const refresh = await client.requestDashboardStatsRefresh(); // 202
+console.log(refresh.status, refresh.requestedAt ?? refresh.startedAt, refresh.currentAsOf);
+// 'queued' (recorded for the lease holder, also when one was already pending)
+// or 'in_progress' (a walk is running; nothing duplicated). Inside the
+// 60-second cooldown the call throws `rate_limit_exceeded` (429) with
+// `retryAfterSecs` set. Poll getDashboardStats() for a newer asOf/version.
+```
+
 ### Per-Account Delta Feed
 
 Each entry carries the dashboard-ready activity fields spread directly
@@ -162,6 +207,13 @@ console.log('raw bytes (base64):', debug.rawTransactionSummary);
 
 Single-key Miden accounts and EVM accounts always return an empty
 proposal queue.
+
+Send proposals carry their P2ID fields on the entry metadata. `noteType`
+is the note's visibility, absent meaning public (issue #322).
+`reclaimHeight` and `timelockHeight` are optional P2IDE constraints
+(issue #366): the presence of *either* means the proposal creates a P2IDE
+note rather than a plain P2ID one, so a dashboard should surface them as
+spend conditions rather than hiding them.
 
 ```typescript
 const page = await client.listAccountProposals('0x...', { limit: 50 });
@@ -359,7 +411,7 @@ shapes:
 ```
 
 Recognized permissions in v1: `dashboard:read`, `accounts:pause`,
-`policies:write`.
+`policies:write`, `stats:refresh` (issue #371: `requestDashboardStatsRefresh()`).
 
 When the server denies a request for insufficient permissions, the
 response body extends the existing flat envelope additively:

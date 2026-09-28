@@ -42,9 +42,13 @@ pub fn print_info(message: &str) {
     println!("ℹ {}", message);
 }
 
+pub fn print_warning(message: &str) {
+    println!("⚠ {}", message);
+}
+
 pub fn print_account_info(account: &MultisigAccount, network_id: NetworkId) {
     print_section("Account Information");
-    println!("  Account ID:     {}", &account.id().to_hex());
+    println!("  Account ID:     {}", account.id().to_hex());
     println!(
         "  Address:        {}",
         account.inner().id().to_bech32(network_id)
@@ -107,8 +111,8 @@ pub fn print_vault(account: &MultisigAccount) {
     }
 
     for (i, asset) in assets.iter().enumerate() {
-        match asset {
-            Asset::Fungible(fungible) => {
+        match asset.as_fungible() {
+            Some(fungible) => {
                 println!(
                     "  [{}] {} tokens (faucet: {})",
                     i + 1,
@@ -116,11 +120,11 @@ pub fn print_vault(account: &MultisigAccount) {
                     shorten_hex(&fungible.faucet_id().to_hex())
                 );
             }
-            Asset::NonFungible(nft) => {
+            None => {
                 println!(
                     "  [{}] NFT (faucet: {})",
                     i + 1,
-                    shorten_hex(&nft.faucet_id().to_hex())
+                    shorten_hex(&asset.faucet_id().to_hex())
                 );
             }
         }

@@ -1,7 +1,7 @@
 use miden_protocol::Word;
 use miden_protocol::crypto::dsa::falcon512_poseidon2::{SecretKey, Signature};
 use miden_protocol::utils::serde::{Deserializable, Serializable};
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, SeedableRng};
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -32,12 +32,12 @@ pub trait KeyStore {
 }
 
 #[derive(Debug, Clone)]
-pub struct FilesystemKeyStore<R: RngCore + Send + Sync> {
+pub struct FilesystemKeyStore<R: Rng + Send + Sync> {
     rng: Arc<RwLock<R>>,
     keys_directory: PathBuf,
 }
 
-impl<R: RngCore + Send + Sync> FilesystemKeyStore<R> {
+impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
     pub fn with_rng(keys_directory: PathBuf, rng: R) -> Result<Self> {
         fs::create_dir_all(&keys_directory).map_err(|error| {
             KeyStoreError::StorageError(format!(
@@ -113,14 +113,14 @@ impl<R: RngCore + Send + Sync> FilesystemKeyStore<R> {
     }
 }
 
-impl<R: RngCore + SeedableRng + Send + Sync> FilesystemKeyStore<R> {
+impl<R: Rng + SeedableRng + Send + Sync> FilesystemKeyStore<R> {
     pub fn new(keys_directory: PathBuf) -> Result<Self> {
         let rng = R::seed_from_u64(rand::random());
         Self::with_rng(keys_directory, rng)
     }
 }
 
-impl<R: RngCore + Send + Sync> KeyStore for FilesystemKeyStore<R> {
+impl<R: Rng + Send + Sync> KeyStore for FilesystemKeyStore<R> {
     fn add_key(&self, key: &SecretKey) -> Result<()> {
         let pub_key = key.public_key().to_commitment();
         let filename = hash_pub_key(pub_key);
@@ -218,7 +218,12 @@ mod tests {
     #[test]
     fn test_hash_pub_key() {
         use miden_protocol::Felt;
-        let pub_key = [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)];
+        let pub_key = [
+            Felt::new_unchecked(1),
+            Felt::new_unchecked(2),
+            Felt::new_unchecked(3),
+            Felt::new_unchecked(4),
+        ];
         let hash1 = hash_pub_key(pub_key.into());
         let hash2 = hash_pub_key(pub_key.into());
 

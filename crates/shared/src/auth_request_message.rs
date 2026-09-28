@@ -52,7 +52,8 @@ impl AuthRequestMessage {
     }
 
     pub fn to_word(&self) -> Word {
-        let account_id_felts: [Felt; 2] = self.account_id.into();
+        let account_id_felts: [Felt; 2] =
+            [self.account_id.prefix().as_felt(), self.account_id.suffix()];
         let timestamp_felt = crate::felt::felt_from_u64_reduced(self.timestamp as u64);
         let payload_elements = self.payload.as_elements();
         let message_elements = vec![
@@ -72,15 +73,15 @@ impl AuthRequestMessage {
 mod tests {
     use super::AuthRequestMessage;
     use crate::auth_request_payload::AuthRequestPayload;
-    use miden_protocol::account::{AccountId, AccountIdVersion, AccountStorageMode, AccountType};
+    use miden_protocol::account::{AccountId, AccountIdVersion, AccountType, AssetCallbackFlag};
 
     #[test]
     fn request_message_digest_changes_with_payload() {
         let account_id = AccountId::dummy(
             [0x8a; 15],
-            AccountIdVersion::Version0,
-            AccountType::RegularAccountUpdatableCode,
-            AccountStorageMode::Private,
+            AccountIdVersion::Version1,
+            AccountType::Private,
+            AssetCallbackFlag::Disabled,
         );
         let timestamp = 1_700_000_000i64;
         let left_payload =

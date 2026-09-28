@@ -49,6 +49,12 @@ variable "guardian_cors_allowed_origins" {
   default     = ""
 }
 
+variable "guardian_allowed_account_schemes" {
+  description = "Comma-separated signature schemes new accounts may register with (falcon, ecdsa). Empty keeps the server default of every scheme; existing accounts are never affected"
+  type        = string
+  default     = ""
+}
+
 variable "vpc_id" {
   description = "VPC ID. If not specified, uses the default VPC"
   type        = string
@@ -87,19 +93,31 @@ variable "postgres_password" {
 }
 
 variable "domain_name" {
-  description = "Root domain name for the HTTPS endpoint (e.g., openzeppelin.com)"
+  description = "Root domain name for the canonical HTTPS endpoint (e.g., example.com)"
   type        = string
   default     = "openzeppelin.com"
 }
 
 variable "subdomain" {
-  description = "Subdomain for the service (e.g., guardian -> guardian.openzeppelin.com). Empty uses the root domain."
+  description = "Subdomain for the canonical service hostname (e.g., guardian -> guardian.example.com). Empty uses the root domain."
   type        = string
   default     = "guardian"
 }
 
 variable "acm_certificate_arn" {
-  description = "ACM certificate ARN for the service domain (e.g., guardian-stg.openzeppelin.com)"
+  description = "ACM certificate ARN for the canonical service hostname"
+  type        = string
+  default     = ""
+}
+
+variable "alias_subdomain" {
+  description = "Migration-only legacy subdomain under domain_name pointing to the same ALB. Terraform manages its DNS record only when a DNS provider is configured; external DNS is supported. Leave empty for normal deployments."
+  type        = string
+  default     = ""
+}
+
+variable "alias_acm_certificate_arn" {
+  description = "Migration-only ACM certificate ARN for the legacy hostname. When empty, acm_certificate_arn is reused and must cover both names."
   type        = string
   default     = ""
 }
@@ -518,6 +536,194 @@ variable "guardian_canonicalization_fast_promotion_enabled" {
   description = "Whether ECS enables the recent-candidate fast promotion pass"
   type        = bool
   default     = true
+}
+
+variable "guardian_log_format" {
+  description = "Log output format for GUARDIAN_LOG_FORMAT (text, json, compact). json enables flattened JSON for CloudWatch Logs Insights"
+  type        = string
+  default     = "json"
+
+  validation {
+    condition     = contains(["text", "json", "compact"], lower(trimspace(var.guardian_log_format)))
+    error_message = "guardian_log_format must be text, json, or compact."
+  }
+}
+
+variable "guardian_metrics_enabled" {
+  description = <<-EOT
+    Whether the Guardian server exposes its Prometheus metrics endpoint inside
+    the ECS task. The endpoint binds loopback inside the task's network
+    namespace and is never reachable via the ALB or security groups; an
+    externally scraped setup would additionally require an explicit bind
+    address, restricted security-group access, and a bearer token — none of
+    which this module configures. Disabling also disables the CloudWatch
+    export pipeline (there is nothing to scrape).
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "cloudwatch_metrics_enabled" {
+  description = <<-EOT
+    Whether the deployment ships the metrics endpoint's data to CloudWatch:
+    runs the ADOT Collector sidecar that scrapes it and exports EMF metrics,
+    and creates the EMF log group, IAM policy, CloudWatch dashboard, and
+    alarms. Effective only while guardian_metrics_enabled is true — the
+    export pipeline cascades off with the endpoint, so disabling the
+    endpoint alone turns everything off. Disable just this flag to keep the
+    (loopback-only) endpoint without publishing CloudWatch custom metrics —
+    useful only for an alternative in-task collector unless the module is
+    customized with a routable bind address, security-group access, and a
+    bearer token.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "adot_image" {
+  description = <<-EOT
+    AWS Distro for OpenTelemetry Collector image for the metrics sidecar,
+    digest-pinned for supply-chain consistency with the server Dockerfile.
+    Refresh the digest with:
+    `docker manifest inspect public.ecr.aws/aws-observability/aws-otel-collector:<tag>`.
+    When bumping, verify metric-name normalization stays off (the
+    receiver config pins `trim_metric_suffixes = false`; check the gate
+    has not been renamed or force-enabled): with normalization on,
+    counters lose their `_total` suffix and stop matching the awsemf
+    declarations, silently blanking counter widgets and starving every
+    notBreaching alarm — while `guardian_build_info` (a gauge, no
+    suffix) keeps the metrics-missing heartbeat green. Verify with
+    `aws cloudwatch list-metrics` after any image bump; metrics-missing
+    does NOT catch partial selection drift.
+  EOT
+  type        = string
+  default     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.49.0@sha256:d2bdfff2c377c3d71d78bd5d9ce9862fd535b12134a5739d87a07801297cf9fd"
+}
+
+variable "metrics_namespace" {
+  description = "CloudWatch namespace for Guardian application metrics. Defaults to <Title(stack_name)>/Server (e.g. Guardian/Server), keeping stacks in the same account separate."
+  type        = string
+  default     = ""
+}
+
+variable "alarm_actions" {
+  description = "ARNs (e.g. SNS topics) notified when a Guardian CloudWatch alarm transitions to ALARM or back to OK. Appended to the Terraform-managed topic when alarm_notifications_enabled is true; with neither, alarms are visible in the console only."
+  type        = list(string)
+  default     = []
+}
+
+variable "alarm_notifications_enabled" {
+  description = <<-EOT
+    Whether Terraform provisions an SNS topic (<stack_name>-alarms) and routes
+    every Guardian CloudWatch alarm's ALARM and OK transitions to it, in
+    addition to any alarm_actions ARNs. Effective only while the metrics
+    pipeline (cloudwatch_metrics_enabled) is on, since that is what creates
+    the alarms. Set alarm_slack_workspace_id and alarm_slack_channel_id to
+    deliver the topic to a Slack channel.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "alarm_slack_workspace_id" {
+  description = <<-EOT
+    Slack workspace (team) ID, e.g. T0123456789, that Amazon Q Developer in
+    chat applications has been authorized for in this AWS account (a one-time
+    console step; the ID is shown on the workspace details page). Together
+    with alarm_slack_channel_id, creates a channel configuration subscribed
+    to the managed alarm topic; requires alarm_notifications_enabled.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.alarm_slack_workspace_id == "" || can(regex("^[A-Z0-9]+$", var.alarm_slack_workspace_id))
+    error_message = "alarm_slack_workspace_id must be a Slack workspace ID (e.g. T0123456789), not a name or URL."
+  }
+}
+
+variable "alarm_slack_channel_id" {
+  description = <<-EOT
+    Slack channel ID, e.g. C0123456789, that receives this stack's alarm
+    notifications (public or private; the Amazon Q app must be invited to
+    the channel). Use one channel per environment so the destination itself
+    carries the environment context.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.alarm_slack_channel_id == "" || can(regex("^[A-Z0-9]+$", var.alarm_slack_channel_id))
+    error_message = "alarm_slack_channel_id must be a Slack channel ID (e.g. C0123456789), not a channel name."
+  }
+}
+
+variable "alarm_error_rate_threshold_percent" {
+  description = "Error-rate percentage above which the HTTP 5xx and gRPC error alarms fire"
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.alarm_error_rate_threshold_percent > 0 && var.alarm_error_rate_threshold_percent <= 100
+    error_message = "alarm_error_rate_threshold_percent must be in (0, 100]."
+  }
+}
+
+variable "alarm_latency_threshold_seconds" {
+  description = "Average HTTP request latency in seconds above which the latency alarm fires"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.alarm_latency_threshold_seconds > 0
+    error_message = "alarm_latency_threshold_seconds must be positive."
+  }
+}
+
+variable "alarm_cpu_threshold_percent" {
+  description = "ECS service average CPU utilization percentage above which the saturation alarm fires. Keep above the autoscaling CPU target so scaling reacts first."
+  type        = number
+  default     = 85
+
+  validation {
+    condition     = var.alarm_cpu_threshold_percent > 0 && var.alarm_cpu_threshold_percent <= 100
+    error_message = "alarm_cpu_threshold_percent must be in (0, 100]."
+  }
+}
+
+variable "alarm_memory_threshold_percent" {
+  description = "ECS service average memory utilization percentage above which the saturation alarm fires. Keep above the autoscaling memory target so scaling reacts first."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.alarm_memory_threshold_percent > 0 && var.alarm_memory_threshold_percent <= 100
+    error_message = "alarm_memory_threshold_percent must be in (0, 100]."
+  }
+}
+
+variable "cloudwatch_log_alarms_enabled" {
+  description = <<-EOT
+    Whether CloudWatch Logs metric filters count the server's ERROR (and,
+    with the dashboard, WARN) log lines under <metrics_namespace>/Logs and
+    an alarm fires on sustained ERROR output. Independent of the metrics
+    pipeline. Requires
+    guardian_log_format = json (plan-time check); set to false to run text
+    or compact logs. See docs/SERVER_AWS_DEPLOY.md#log-level-alarms.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "alarm_log_error_threshold" {
+  description = "ERROR-level server log lines per 5-minute period above which the log-errors alarm fires when exceeded in two consecutive periods. 0 fires on any sustained ERROR output."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.alarm_log_error_threshold >= 0 && floor(var.alarm_log_error_threshold) == var.alarm_log_error_threshold
+    error_message = "alarm_log_error_threshold must be a non-negative integer."
+  }
 }
 
 # Resource naming

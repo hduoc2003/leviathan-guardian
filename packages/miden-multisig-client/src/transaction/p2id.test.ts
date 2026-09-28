@@ -2,13 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Word } from '@miden-sdk/miden-sdk';
 
 const {
-  mockFromVaultKey,
   mockFungibleAssetConstructor,
+  mockFeeAwareBuilder,
+  mockExtendAdviceMap,
   mockHashElements,
   mockNormalizeHexWord,
   mockRandomWord,
   mockWordFromHex,
   noteMetadataCalls,
+  noteRecipientCalls,
+  noteStorageCalls,
   saltFelts,
 } = vi.hoisted(() => {
   const saltFelts = [
@@ -19,14 +22,17 @@ const {
   ];
 
   return {
-    mockFromVaultKey: vi.fn((vaultKey: unknown, amount: bigint) => ({
-      kind: 'asset-from-vault-key',
-      vaultKey,
-      amount,
-    })),
     mockFungibleAssetConstructor: vi.fn(),
+    mockFeeAwareBuilder: vi.fn(),
+    mockExtendAdviceMap: vi.fn(),
     noteMetadataCalls: [] as unknown[][],
-    mockHashElements: vi.fn().mockReturnValue({ toString: () => 'serial' }),
+    noteRecipientCalls: [] as unknown[][],
+    noteStorageCalls: [] as unknown[][],
+    mockHashElements: vi.fn().mockReturnValue({
+      toString: () => 'serial',
+      toHex: () => '0xcommitment',
+      toFelts: () => [{ id: 'h-0' }, { id: 'h-1' }, { id: 'h-2' }, { id: 'h-3' }],
+    }),
     mockNormalizeHexWord: vi.fn((hex: string) => hex),
     mockRandomWord: vi.fn().mockReturnValue({
       toHex: () => '0x' + 'aa'.repeat(32),
@@ -71,7 +77,9 @@ vi.mock('@miden-sdk/miden-sdk', () => {
   }
 
   class NoteStorage {
-    constructor(_inputs: FeltArray) {}
+    constructor(inputs: FeltArray) {
+      noteStorageCalls.push([inputs]);
+    }
   }
 
   class NoteMetadata {
@@ -86,10 +94,12 @@ vi.mock('@miden-sdk/miden-sdk', () => {
 
   class NoteRecipient {
     constructor(
-      _serialNum: unknown,
-      _noteScript: unknown,
-      _noteInputs: unknown,
-    ) {}
+      serialNum: unknown,
+      noteScript: unknown,
+      noteInputs: unknown,
+    ) {
+      noteRecipientCalls.push([serialNum, noteScript, noteInputs]);
+    }
   }
 
   class Note {
@@ -104,8 +114,6 @@ vi.mock('@miden-sdk/miden-sdk', () => {
     constructor(faucet: unknown, amount: bigint) {
       mockFungibleAssetConstructor(faucet, amount);
     }
-
-    static fromVaultKey = mockFromVaultKey;
   }
 
   class NoteArray {
@@ -117,16 +125,13 @@ vi.mock('@miden-sdk/miden-sdk', () => {
       return this;
     }
 
-    withAuthArg(_authArg: unknown): this {
+    extendAdviceMap(adviceMap: unknown): this {
+      mockExtendAdviceMap(adviceMap);
       return this;
     }
 
-    extendAdviceMap(_adviceMap: unknown): this {
-      return this;
-    }
-
-    build(): { kind: 'request' } {
-      return { kind: 'request' };
+    build(): { kind: 'request'; authArg: () => unknown } {
+      return { kind: 'request', authArg: () => ({ set: true }) };
     }
   }
 
@@ -152,6 +157,7 @@ vi.mock('@miden-sdk/miden-sdk', () => {
     NoteStorage,
     NoteScript: {
       p2id: vi.fn(() => ({ kind: 'p2id-script' })),
+      p2ide: vi.fn(() => ({ kind: 'p2ide-script' })),
     },
     NoteTag: {
       withAccountTarget: vi.fn(() => ({ kind: 'tag' })),
@@ -181,43 +187,65 @@ vi.mock('../utils/random.js', () => ({
   randomWord: mockRandomWord,
 }));
 
+import { TransactionRequestBuilder } from '@miden-sdk/miden-sdk';
 import { buildP2idTransactionRequest, parseP2idNoteType, p2idNoteTypeToMetadata } from './p2id.js';
-import type { Account } from '@miden-sdk/miden-sdk';
+
+const client = { feeAwareTransactionRequestBuilder: mockFeeAwareBuilder } as never;
+import { NoteType } from '@miden-sdk/miden-sdk';
 
 const FAUCET_ID = '0x7bfb0f38b0fafa103f86a805594171';
 
-const mockAccount = {
-  vault: () => ({
-    fungibleAssets: () => [
-      {
-        faucetId: () => ({ toString: () => FAUCET_ID }),
-        vaultKey: () => ({ kind: 'vault-key' }),
-      },
-    ],
-  }),
-} as unknown as Account;
-import { NoteType } from '@miden-sdk/miden-sdk';
-
 describe('buildP2idTransactionRequest', () => {
   beforeEach(() => {
-    mockFromVaultKey.mockClear();
     mockFungibleAssetConstructor.mockClear();
+    mockFeeAwareBuilder.mockReset();
+    mockFeeAwareBuilder.mockImplementation(async () => new TransactionRequestBuilder());
+    mockExtendAdviceMap.mockClear();
     mockHashElements.mockClear();
     mockNormalizeHexWord.mockClear();
     mockRandomWord.mockClear();
     mockWordFromHex.mockClear();
     noteMetadataCalls.length = 0;
+    noteRecipientCalls.length = 0;
+    noteStorageCalls.length = 0;
   });
 
-  it('derives serial number from salt felts plus four zero felts', () => {
+  it('asks the client for the sender\'s auth args under the proposal salt', async () => {
     const salt = { toHex: () => '0x' + '11'.repeat(32) } as unknown as Word;
 
-    buildP2idTransactionRequest(
+    await buildP2idTransactionRequest(
+      client,
       '0x7bfb0f38b0fafa103f86a805594170',
       '0x8a65fc5a39e4cd106d648e3eb4ab5f',
       FAUCET_ID,
       10n,
-      mockAccount,
+      { salt, boundBlockNum: 77 },
+    );
+
+    expect(mockFeeAwareBuilder).toHaveBeenCalledTimes(1);
+    const [sender, expiration, feeSalt, boundBlockNum] = mockFeeAwareBuilder.mock.calls[0] as [
+      { hex: string },
+      unknown,
+      { toHex: () => string },
+      unknown,
+    ];
+    expect(sender.hex).toBe('0x7bfb0f38b0fafa103f86a805594170');
+    expect(expiration).toBeNull();
+    expect(feeSalt.toHex()).toBe(salt.toHex());
+    expect(boundBlockNum).toBe(77);
+    expect(mockExtendAdviceMap).not.toHaveBeenCalled();
+    expect(mockWordFromHex).toHaveBeenCalledWith(salt.toHex());
+  });
+
+  it('derives serial number from salt felts plus four zero felts', async () => {
+    const salt = { toHex: () => '0x' + '11'.repeat(32) } as unknown as Word;
+
+    await buildP2idTransactionRequest(
+      client,
+      '0x7bfb0f38b0fafa103f86a805594170',
+      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
+      FAUCET_ID,
+      10n,
       { salt },
     );
 
@@ -235,98 +263,156 @@ describe('buildP2idTransactionRequest', () => {
     }
   });
 
-  it('rebuilds the transferred asset from the held asset vault key', () => {
-    buildP2idTransactionRequest(
+  it('creates a public note by default (issue #322)', async () => {
+    await buildP2idTransactionRequest(
+      client,
       '0x7bfb0f38b0fafa103f86a805594170',
       '0x8a65fc5a39e4cd106d648e3eb4ab5f',
       FAUCET_ID,
       10n,
-      mockAccount,
-    );
-
-    // The vault key carries the callback flag, which is part of the asset
-    // commitment; the plain constructor would default it and the transfer
-    // would abort.
-    expect(mockFromVaultKey).toHaveBeenCalledTimes(1);
-    expect(mockFromVaultKey).toHaveBeenCalledWith({ kind: 'vault-key' }, 10n);
-    expect(mockFungibleAssetConstructor).not.toHaveBeenCalled();
-  });
-
-  it('falls back to the plain constructor when the vault holds no such asset', () => {
-    const emptyVault = {
-      vault: () => ({ fungibleAssets: () => [] }),
-    } as unknown as Account;
-
-    buildP2idTransactionRequest(
-      '0x7bfb0f38b0fafa103f86a805594170',
-      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
-      FAUCET_ID,
-      10n,
-      emptyVault,
-    );
-
-    // Execution then surfaces the missing-asset error, which is more useful
-    // than guessing a vault key that is not there.
-    expect(mockFromVaultKey).not.toHaveBeenCalled();
-    expect(mockFungibleAssetConstructor).toHaveBeenCalledTimes(1);
-    const [faucetArg, amountArg] = mockFungibleAssetConstructor.mock.calls[0] as [
-      { toString(): string },
-      bigint,
-    ];
-    expect(faucetArg.toString()).toBe(FAUCET_ID);
-    expect(amountArg).toBe(10n);
-  });
-
-  it('creates a public note by default (issue #322)', () => {
-    buildP2idTransactionRequest(
-      '0x7bfb0f38b0fafa103f86a805594170',
-      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
-      '0x7bfb0f38b0fafa103f86a805594171',
-      10n,
-      mockAccount,
     );
 
     expect(noteMetadataCalls).toHaveLength(1);
     expect(noteMetadataCalls[0][1]).toBe(NoteType.Public);
   });
 
-  it('threads the requested noteType into the note metadata (issue #322)', () => {
-    buildP2idTransactionRequest(
+  it('builds the asset from the faucet id, whose callback flag it carries since Miden 0.16', async () => {
+    await buildP2idTransactionRequest(
+      client,
+      '0x7bfb0f38b0fafa103f86a805594170',
+      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
+      FAUCET_ID,
+      10n,
+    );
+
+    expect(mockFungibleAssetConstructor).toHaveBeenCalledTimes(1);
+    const [faucet, amount] = mockFungibleAssetConstructor.mock.calls[0] as [{ hex: string }, bigint];
+    expect(faucet.hex).toBe(FAUCET_ID);
+    expect(amount).toBe(10n);
+  });
+
+  it('threads the requested noteType into the note metadata (issue #322)', async () => {
+    await buildP2idTransactionRequest(
+      client,
       '0x7bfb0f38b0fafa103f86a805594170',
       '0x8a65fc5a39e4cd106d648e3eb4ab5f',
       '0x7bfb0f38b0fafa103f86a805594171',
       10n,
-      mockAccount,
       { noteType: NoteType.Private },
     );
 
     expect(noteMetadataCalls).toHaveLength(1);
     expect(noteMetadataCalls[0][1]).toBe(NoteType.Private);
   });
+
+  it('builds a plain P2ID note without heights: p2id script and a zero salt', async () => {
+    await buildP2idTransactionRequest(
+      client,
+      '0x7bfb0f38b0fafa103f86a805594170',
+      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
+      FAUCET_ID,
+      10n,
+    );
+
+    expect(noteRecipientCalls).toHaveLength(1);
+    expect(noteRecipientCalls[0][1]).toEqual({ kind: 'p2id-script' });
+    const [storageInputs] = noteStorageCalls[0] as [{ values: unknown[] }];
+    expect(storageInputs.values.slice(0, 2)).toEqual([2, 1]);
+    expect((storageInputs.values[2] as { value: bigint }).value).toBe(0n);
+    expect((storageInputs.values[3] as { value: bigint }).value).toBe(0n);
+  });
+
+  it('builds a P2IDE note when reclaimHeight is set (issue #366)', async () => {
+    await buildP2idTransactionRequest(
+      client,
+      '0x7bfb0f38b0fafa103f86a805594170',
+      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
+      FAUCET_ID,
+      10n,
+      { reclaimHeight: 12345 },
+    );
+
+    expect(noteRecipientCalls).toHaveLength(1);
+    expect(noteRecipientCalls[0][1]).toEqual({ kind: 'p2ide-script' });
+
+    const [storageInputs] = noteStorageCalls[0] as [{ values: unknown[] }];
+    expect(storageInputs.values.slice(0, 4)).toEqual([2, 1, 2, 1]);
+    expect((storageInputs.values[4] as { value: bigint }).value).toBe(12345n);
+    expect((storageInputs.values[5] as { value: bigint }).value).toBe(0n);
+  });
+
+  it('builds a P2IDE note when only timelockHeight is set (issue #366)', async () => {
+    await buildP2idTransactionRequest(
+      client,
+      '0x7bfb0f38b0fafa103f86a805594170',
+      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
+      FAUCET_ID,
+      10n,
+      { timelockHeight: 777 },
+    );
+
+    expect(noteRecipientCalls[0][1]).toEqual({ kind: 'p2ide-script' });
+    const [storageInputs] = noteStorageCalls[0] as [{ values: unknown[] }];
+    expect((storageInputs.values[4] as { value: bigint }).value).toBe(0n);
+    expect((storageInputs.values[5] as { value: bigint }).value).toBe(777n);
+  });
+
+  it('carries both heights into the P2IDE storage (issue #366)', async () => {
+    await buildP2idTransactionRequest(
+      client,
+      '0x7bfb0f38b0fafa103f86a805594170',
+      '0x8a65fc5a39e4cd106d648e3eb4ab5f',
+      FAUCET_ID,
+      10n,
+      { reclaimHeight: 500, timelockHeight: 400 },
+    );
+
+    const [storageInputs] = noteStorageCalls[0] as [{ values: unknown[] }];
+    expect((storageInputs.values[4] as { value: bigint }).value).toBe(500n);
+    expect((storageInputs.values[5] as { value: bigint }).value).toBe(400n);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -5],
+    ['fractional', 1.5],
+    ['above u32::MAX', 0x1_0000_0000],
+  ])('rejects a %s height instead of building a divergent note (issue #366)', async (_label, height) => {
+    await expect(
+      buildP2idTransactionRequest(
+        client,
+        '0x7bfb0f38b0fafa103f86a805594170',
+        '0x8a65fc5a39e4cd106d648e3eb4ab5f',
+        FAUCET_ID,
+        10n,
+        { reclaimHeight: height },
+      ),
+    ).rejects.toThrow(/unsupported reclaimHeight/);
+  });
 });
 
 describe('parseP2idNoteType', () => {
-  it('maps absent to Public (pre-#322 proposals)', () => {
+  it('maps absent to Public (pre-#322 proposals)', async () => {
     expect(parseP2idNoteType(undefined)).toBe(NoteType.Public);
   });
 
-  it('maps wire values to note types', () => {
+  it('maps wire values to note types', async () => {
     expect(parseP2idNoteType('public')).toBe(NoteType.Public);
     expect(parseP2idNoteType('private')).toBe(NoteType.Private);
   });
 
-  it('rejects unknown values instead of silently rebuilding a public note', () => {
+  it('rejects unknown values instead of silently rebuilding a public note', async () => {
     expect(() => parseP2idNoteType('encrypted')).toThrow(/unsupported metadata.noteType/);
   });
 });
 
 describe('p2idNoteTypeToMetadata', () => {
-  it('omits the default so public payloads keep the legacy wire shape', () => {
+  it('omits the default so public payloads keep the legacy wire shape', async () => {
     expect(p2idNoteTypeToMetadata(undefined)).toBeUndefined();
     expect(p2idNoteTypeToMetadata(NoteType.Public)).toBeUndefined();
   });
 
-  it('serializes private', () => {
+  it('serializes private', async () => {
     expect(p2idNoteTypeToMetadata(NoteType.Private)).toBe('private');
   });
 });

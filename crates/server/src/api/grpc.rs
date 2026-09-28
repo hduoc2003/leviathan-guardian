@@ -2,8 +2,8 @@ use crate::delta_object::{DeltaObject, ProposalSignature};
 use crate::metadata::NetworkConfig;
 use crate::metadata::auth::{Auth, Credentials, ExtractCredentials};
 use crate::services::{
-    self, ConfigureAccountParams, GetDeltaParams, GetDeltaProposalParams, GetStateParams,
-    LookupAccountParams, PushDeltaParams,
+    self, ConfigureAccountParams, GetDeltaHistoryParams, GetDeltaParams, GetDeltaProposalParams,
+    GetStateParams, LookupAccountParams, PushDeltaParams,
 };
 use crate::state::AppState;
 use guardian_shared::SignatureScheme;
@@ -166,6 +166,42 @@ impl Guardian for GuardianService {
                 success: true,
                 message: "Merged delta retrieved successfully".to_string(),
                 merged_delta: Some(delta_to_proto(&response.merged_delta)),
+                error_code: String::new(),
+            })),
+            Err(e) => Err(Status::from(e)),
+        }
+    }
+
+    async fn get_delta_history(
+        &self,
+        request: Request<GetDeltaHistoryRequest>,
+    ) -> Result<Response<GetDeltaHistoryResponse>, Status> {
+        let auth = authenticated_request(&request)?;
+
+        let req = request.into_inner();
+
+        let limit = services::validate_limit(req.limit).map_err(Status::from)?;
+        let cursor = services::parse_cursor(
+            req.cursor.as_deref(),
+            self.app_state.dashboard.cursor_secret(),
+            crate::dashboard::cursor::CursorKind::AccountDeltaHistory,
+        )
+        .map_err(Status::from)?;
+
+        let params = GetDeltaHistoryParams {
+            account_id: req.account_id,
+            limit,
+            cursor,
+            credentials: auth,
+        };
+
+        // Call service layer
+        match services::get_delta_history(&self.app_state, params).await {
+            Ok(page) => Ok(Response::new(GetDeltaHistoryResponse {
+                success: true,
+                message: "History retrieved successfully".to_string(),
+                entries: page.items.into_iter().map(history_entry_to_proto).collect(),
+                next_cursor: page.next_cursor,
                 error_code: String::new(),
             })),
             Err(e) => Err(Status::from(e)),
@@ -398,6 +434,44 @@ fn authenticated_request<T: Message>(request: &Request<T>) -> Result<Credentials
 }
 
 // Helper functions to convert between internal types and protobuf types
+
+/// Project a service-layer history entry into its proto shape. Enum
+/// labels (`tag`, `kind`, `section`) cross the wire as the same stable
+/// snake_case strings the JSON serialization uses.
+fn history_entry_to_proto(entry: services::HistoryEntry) -> HistoryEntry {
+    let note_to_proto = |note: crate::delta_summary::DecodedNote| HistoryNote {
+        note_id: note.note_id,
+        tag: note.tag.as_str().to_string(),
+        note_type: note.note_type.as_str().to_string(),
+        assets: note
+            .assets
+            .into_iter()
+            .map(|asset| HistoryNoteAsset {
+                asset_id: asset.asset_id,
+                kind: asset.kind.as_str().to_string(),
+                amount: asset.amount,
+            })
+            .collect(),
+        sender: note.sender,
+        recipient: note.recipient,
+    };
+    HistoryEntry {
+        nonce: entry.nonce,
+        status: entry.status.as_str().to_string(),
+        timestamp: entry.timestamp,
+        new_commitment: entry.new_commitment,
+        input_notes: entry.input_notes.into_iter().map(note_to_proto).collect(),
+        output_notes: entry.output_notes.into_iter().map(note_to_proto).collect(),
+        decode_warnings: entry
+            .decode_warnings
+            .into_iter()
+            .map(|warning| HistoryDecodeWarning {
+                section: warning.section.as_str().to_string(),
+                reason: warning.reason,
+            })
+            .collect(),
+    }
+}
 fn delta_to_proto(delta: &DeltaObject) -> guardian::DeltaObject {
     let (candidate_at, canonical_at, discarded_at) = match &delta.status {
         crate::delta_object::DeltaStatus::Pending { timestamp, .. } => {
@@ -680,7 +754,7 @@ mod tests {
         let (state, _storage, _network, _metadata) = create_test_state();
         let service = create_service(state);
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -713,7 +787,7 @@ mod tests {
         let (state, storage, _network, metadata) = create_test_state();
         let service = create_service(state);
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -815,7 +889,7 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_abandon_delta_candidate_success() {
         let (state, storage, network, metadata) = create_test_state();
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         abandon_grpc_fixtures(&storage, &network, &metadata, &account_id, &signer, false);
         let service = create_service(state);
@@ -848,7 +922,7 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_abandon_delta_candidate_landed_error_code() {
         let (state, storage, network, metadata) = create_test_state();
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         abandon_grpc_fixtures(&storage, &network, &metadata, &account_id, &signer, true);
         let service = create_service(state);
@@ -878,7 +952,7 @@ mod tests {
         let (state, storage, _network, metadata) = create_test_state();
         let service = create_service(state);
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -927,7 +1001,7 @@ mod tests {
         let (state, storage, _network, metadata) = create_test_state();
         let service = create_service(state);
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -980,7 +1054,7 @@ mod tests {
         let (state, storage, _network, metadata) = create_test_state();
         let service = create_service(state);
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -1014,7 +1088,7 @@ mod tests {
         let (state, storage, _network, metadata) = create_test_state();
         let service = create_service(state);
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -1068,7 +1142,7 @@ mod tests {
         let (state, storage, _network, metadata) = create_test_state();
         let service = create_service(state);
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -1107,7 +1181,7 @@ mod tests {
         let (state, _storage, _network, metadata) = create_test_state();
         let service = create_service(state);
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
 
         let _metadata = metadata.with_get(Ok(Some(create_account_metadata(
@@ -1141,7 +1215,7 @@ mod tests {
         let (state, storage, _network, metadata) = create_test_state();
         let service = create_service(state);
 
-        let account_id = "0x7b7b7b7a7b7b7b907b7b7b7b7b7b7b".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 

@@ -1,6 +1,8 @@
 use crate::KeyStoreError;
 use miden_protocol::Word;
-use miden_protocol::crypto::dsa::ecdsa_k256_keccak::{PublicKey, SecretKey, Signature};
+use miden_protocol::crypto::dsa::ecdsa_k256_keccak::{
+    PublicKey, Signature, SigningKey as SecretKey,
+};
 use miden_protocol::utils::serde::{Deserializable, Serializable};
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -175,6 +177,25 @@ mod tests {
         let retrieved_key = keystore.get_ecdsa_key(pub_key).unwrap();
 
         assert_eq!(secret_key.to_bytes(), retrieved_key.to_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ecdsa_add_key_writes_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let keystore = FilesystemEcdsaKeyStore::new(temp_dir.path().to_path_buf()).unwrap();
+        let secret_key = SecretKey::new();
+        keystore.add_ecdsa_key(&secret_key).unwrap();
+
+        let file_path = keystore.file_path_for_commitment(secret_key.public_key().to_commitment());
+        let mode = std::fs::metadata(&file_path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "a stored private key must not be readable by group or others"
+        );
     }
 
     #[test]

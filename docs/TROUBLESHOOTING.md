@@ -9,6 +9,46 @@ For local-dev setup see [`docs/LOCAL_DEV.md`](./LOCAL_DEV.md).
 
 ## By symptom
 
+### Client and node disagree about the network version
+
+A Guardian server or SDK rejects a node from a different Miden line (for
+example a 0.17 build against a 0.16 node, or the reverse) at the RPC
+boundary: the Miden client sends the genesis commitment with every request,
+so a version mismatch surfaces as a gRPC rejection when connecting or
+syncing, not as silent corruption. Point the client at a node running the
+line this build pins. The
+[compatibility matrix](./MIDEN_COMPATIBILITY.md#support-matrix) lists that
+line and the public networks running it; a local `miden-node` from that
+line is the fallback when none does.
+
+### State created on Miden 0.16 fails to load after the 0.17 upgrade
+
+The same shape as the 0.15 to 0.16 case below. A Rust SQLite store or a
+browser IndexedDB store created under 0.16 does not open under 0.17, stored
+accounts fail to deserialize with a version error, and the first 0.17 server
+startup runs the irreversible Miden reset. Recreate client stores rather than
+clearing them, and recreate accounts. Operator steps are in
+[`PRODUCTION.md`](./PRODUCTION.md#upgrading-to-miden-017); what changed is in
+[`MIDEN_COMPATIBILITY.md`](./MIDEN_COMPATIBILITY.md).
+
+### State created on Miden 0.15 fails to load after the 0.16 upgrade
+
+Deserialization errors such as `Unsupported version. Got '[0, 0, 3]'`, a
+local client store that errors on open, or a demo that panics on stale
+`~/.guardian` metadata all mean the same thing: state serialized under
+Miden 0.15 is not readable under 0.16, and the 0.16 devnet is a fresh
+chain, so 0.15-era accounts and notes no longer exist on-chain. There is
+no migration: delete local miden-client stores (`store.sqlite3`),
+`~/.guardian` metadata, and browser IndexedDB state, then recreate
+accounts. The Guardian server does not keep 0.15 account records either: the
+first 0.16 startup runs an irreversible reset that deletes Miden account
+metadata, states, deltas, and proposals (EVM rows are preserved). So after the
+upgrade any remaining failure of this kind is a *client-side* leftover, not
+server state. Operator steps are in
+[`PRODUCTION.md`](./PRODUCTION.md#upgrading-to-miden-016); what changed between
+Miden lines is in
+[`MIDEN_COMPATIBILITY.md`](./MIDEN_COMPATIBILITY.md).
+
 ### Server fails to start
 
 Most startup failures are environment misconfiguration. Check in order:
@@ -51,6 +91,9 @@ Most startup failures are environment misconfiguration. Check in order:
 5. **Postgres migrations fail.** The Postgres path runs migrations at
    startup. If the DB user lacks `CREATE` permissions, startup fails.
    Grant `CREATE` on the schema or run migrations as a privileged user.
+   For a migration that times out, crash-loops the task, or breaks
+   authentication mid-deploy, see [Postgres migrations block startup or fail
+   mid-deploy](#postgres-migrations-block-startup-or-fail-mid-deploy).
 6. **ACK secrets missing in prod.**
    `scripts/aws-deploy.sh deploy` refuses to apply if either ACK secret
    is missing. Run `DEPLOY_STAGE=prod ./scripts/aws-deploy.sh bootstrap-ack-keys`
@@ -72,17 +115,84 @@ Most startup failures are environment misconfiguration. Check in order:
      includes the Amazon Trust Services roots, not only the RDS CA roots.
    - works under `verify-ca` but fails under `verify-full` → hostname/SAN
      mismatch with the endpoint. See [Database TLS](./CONFIGURATION.md#database-tls).
-8. **Replay-protection state file missing (filesystem builds).** Startup
+9. **Replay-protection state file missing or inconsistent (filesystem builds).** Startup
    fails with `Replay-protection state file ... is missing` when
    `.metadata/auth_state.json` has been deleted from a store whose
    `accounts.json` was already migrated off legacy timestamps. Starting
    anyway would reset replay protection and re-accept previously seen
    request timestamps, so the server refuses instead. Restore
    `auth_state.json` from backup together with the rest of the metadata
-   directory. If no backup exists, recreating the file with the literal
-   content `{}` lets the server start — that is an explicit operator
-   decision to accept a replay window as wide as the timestamp skew
-   allowance.
+   directory, including `.metadata/auth_state_legacy_floor_v1` when it
+   exists. If a restore predates that marker, startup re-runs floor
+   repair and synthesizes an account-level floor from the highest stored
+   signer timestamp for every account, including ones created after the
+   per-signer migration. A newly added signer whose first request
+   timestamp is at or below that floor is rejected once; the next
+   strictly later timestamp succeeds. If no backup exists, recreating
+   `auth_state.json` with the literal content `{}` lets the server start.
+   That is an explicit operator decision to accept a replay window as
+   wide as the timestamp skew allowance. If startup instead reports
+   replay state with no matching account metadata, restore
+   `accounts.json` and `auth_state.json` from the same backup; Guardian
+   will not rewrite or discard the unmatched floors.
+
+### Postgres migrations block startup or fail mid-deploy
+
+Migrations run at server startup, before the connection pools are built.
+Each migration runs in a single transaction, so a failure never leaves a
+half-applied schema: the task exits, the orchestrator restarts it, and it
+retries from the same point.
+
+**Check which migrations are applied.** Compare the database against the
+migration directory (`crates/server/migrations/`, whose directory-name
+timestamps are the versions):
+
+```sql
+SELECT version FROM __diesel_schema_migrations ORDER BY version DESC LIMIT 5;
+```
+
+**`Timed out after 60s waiting for the migration advisory lock`.** Only one
+replica migrates at a time, serialised by a Postgres advisory lock. This
+message means another replica held it for the whole wait, or a session died
+mid-migration without releasing it. Find the holder:
+
+```sql
+SELECT a.pid, a.state, now() - a.xact_start AS age, left(a.query, 120) AS query
+  FROM pg_locks l
+  JOIN pg_stat_activity a USING (pid)
+ WHERE l.locktype = 'advisory';
+```
+
+The lock is released when its session ends, so a restart of the stuck replica
+clears it. Do not unlock it manually while another replica is still migrating.
+
+**`Failed to run migrations: ... canceling statement due to lock timeout`.**
+Migrations that rewrite a hot table take an explicit table lock with a 5s
+`lock_timeout`, so they fail fast rather than queueing every later writer
+behind them. A concurrent long-running transaction on the locked table is the
+usual cause:
+
+```sql
+SELECT pid, now() - xact_start AS age, state, left(query, 120) AS query
+  FROM pg_stat_activity
+ WHERE xact_start IS NOT NULL
+   AND now() - xact_start > interval '5 seconds'
+ ORDER BY age DESC;
+```
+
+A restart normally succeeds. Repeated failures mean a persistent long
+transaction, not a broken migration.
+
+**Authenticated requests fail on some replicas during a deploy.** A migration
+that changes a table the *previous* binary writes is not backward compatible,
+and the deployment keeps old tasks serving until the new one is healthy
+(`deployment_minimum_healthy_percent = 100`). Between the migration committing
+and the old tasks draining, requests routed to an old task fail. This is
+deliberate: failing closed beats writing state the new schema cannot represent.
+It is expected for `2026-07-31-000001_account_auth_state` and
+`2026-08-13-000001_auth_state_per_signer`. To eliminate the window rather than
+ride it out, stop the old tasks before the new one migrates, which trades the
+partial errors for brief full downtime.
 
 ### Guardian public key changes unexpectedly
 
@@ -108,32 +218,57 @@ Common benign causes:
 
 ### Signed requests are rejected at the auth layer
 
-This section covers the auth-middleware verdict — `401` with
-`code: authentication_failed`. If your request was *authenticated* but
-still rejected (e.g. `403 authorization_failed`,
-`403 signer_not_authorized`, `400 commitment_mismatch`,
-`409 conflict_pending_*`), jump straight to the
-[error code reference](#error-code-reference) — the signature was fine,
-the service layer rejected the operation.
+This section covers the auth-middleware verdicts, `401` with
+`code: authentication_failed` or `code: authentication_replay`. If your
+request was *authenticated* but still rejected (e.g.
+`403 authorization_failed`, `403 signer_not_authorized`,
+`400 commitment_mismatch`, `409 conflict_pending_*`), jump straight to
+the [error code reference](#error-code-reference): the signature was
+fine, the service layer rejected the operation.
 
-The auth middleware returns `401 authentication_failed` for three
-reasons:
+The two 401 codes mean different things (issue #367 split them):
 
-1. **Clock skew.** Timestamps must be within ±5 minutes of server time
-   ([`metadata/auth/credentials.rs:6`](../crates/server/src/metadata/auth/credentials.rs#L6)).
-   Sync the client clock (NTP) or check for container time drift.
-2. **Reused timestamp.** The server enforces *strictly monotonic*
-   timestamps per public key. If you replay an old request, or two
-   in-flight requests share a millisecond, the second is rejected.
-   Generate fresh timestamps per request and serialise concurrent
-   requests from the same key.
-3. **Modified payload after signing.** The signature covers the request
-   body hash. Mutating the body (proxy reformatting, JSON re-serialise)
-   invalidates the signature. Sign-then-send; do not transform between.
+- **`authentication_replay`** (`meta.retryable: true`). The request was
+  correctly signed, but its `x-timestamp` was not strictly greater than
+  the last timestamp Guardian accepted *from the same signer* on that
+  account. This is the replay-protection CAS, not a credential problem:
+  it happens when two in-flight requests from one client land out of
+  order, or when the same key is used from two processes at once. Both
+  SDK clients retry it automatically (bounded, fresh timestamp and
+  signature per attempt); a user-visible `authentication_replay` means
+  the condition persisted through the retry budget; look for a second
+  process (background poller, second tab, another host) signing with
+  the same key. Replay state is scoped per `(account, signer)`, so
+  other cosigners of a multisig never cause this for you.
+- **`authentication_failed`** (`meta.retryable: false`, terminal) for
+  three reasons:
+  1. **Clock skew.** Timestamps must be within ±5 minutes of server time
+     ([`metadata/auth/credentials.rs:6`](../crates/server/src/metadata/auth/credentials.rs#L6)).
+     Sync the client clock (NTP) or check for container time drift.
+  2. **Invalid or unauthorized signature.** The signer's public-key
+     commitment is not in the account's authorized set, or the signature
+     does not verify.
+  3. **Modified payload after signing.** The signature covers the
+     request body hash. Mutating the body (proxy reformatting, JSON
+     re-serialise) invalidates the signature. Sign-then-send; do not
+     transform between.
 
 Headers required on every authenticated request: `x-pubkey`,
 `x-signature`, `x-timestamp`. If any are missing the response is also
-`authentication_failed`.
+`authentication_failed`. Never retry `authentication_failed`; it will
+not succeed until the underlying cause (clock, key, payload) changes.
+
+**Mixed server/client rollout:** SDK clients retry only
+`authentication_replay`; they never retry `authentication_failed`. A replay CAS
+reported under the older authentication code, or received by a client without
+replay-specific retry handling, can therefore surface as a terminal 401 until
+both sides use the same error contract.
+
+The same server upgrade changes HTTP `/configure` failures from a
+`ConfigureResponse` carrying `success: false` to the standard
+`{ code, message, meta }` error envelope. Update direct HTTP integrations that
+inspect the old body shape before rolling out the server; gRPC continues to use
+the shared protobuf response.
 
 ### Pending proposals never resolve
 
@@ -308,8 +443,8 @@ Server knobs (set on the task, not per-account):
 | Variable | Default | Notes |
 |---|---|---|
 | `GUARDIAN_RATE_LIMIT_ENABLED` | `true` | Set `false` only in test environments. |
-| `GUARDIAN_RATE_BURST_PER_SEC` | `10` (dev), `200` (prod) | Requests per one-second window. |
-| `GUARDIAN_RATE_PER_MIN` | `60` (dev), `5000` (prod) | Sustained rate. |
+| `GUARDIAN_RATE_BURST_PER_SEC` | `10`; `200` when `GUARDIAN_ENV=prod` | Requests per one-second window. |
+| `GUARDIAN_RATE_PER_MIN` | `60`; `5000` when `GUARDIAN_ENV=prod` | Sustained rate. |
 | `GUARDIAN_MAX_REQUEST_BYTES` | `1048576` (1 MB) | Reject larger bodies. |
 
 If you legitimately need higher throughput, raise these via the deploy
@@ -354,9 +489,11 @@ come from
 
 | Code | HTTP | First check |
 |---|---|---|
-| `authentication_failed` | 401 | Clock skew, reused timestamp, modified payload, missing headers. |
+| `authentication_failed` | 401 | Clock skew, invalid/unauthorized signature, modified payload, missing headers. Terminal; never retried. |
+| `authentication_replay` | 401 | Correctly signed but the timestamp lost the per-signer replay CAS. `retryable: true`; SDK clients retry it automatically with a fresh timestamp and signature. See [the auth-layer section](#signed-requests-are-rejected-at-the-auth-layer). |
 | `authorization_failed` | 403 | Account credentials don't authorize the operation. |
 | `signer_not_authorized` | 403 | Signer isn't on the proposal's allowed signer set. |
+| `signature_scheme_not_allowed` | 403 | `/configure` for a **new** account used a signature scheme the operator excluded with `GUARDIAN_ALLOWED_ACCOUNT_SCHEMES`. `meta.scheme` is the rejected scheme, `meta.allowed_schemes` the accepted set; create the account with an allowed scheme (usually `ecdsa`). Accounts already in this Guardian's metadata are never rejected this way; a Falcon account re-onboarding after a metadata restore or via `SwitchGuardian` counts as new and needs `falcon` allowed for the migration. `retryable: false`. |
 | `GUARDIAN_INSUFFICIENT_OPERATOR_PERMISSION` | 403 | Operator dashboard call requires a permission the operator doesn't have. Response body carries `missing_permissions: string[]` (lex-sorted, deduplicated) and `retryable: false`. See [`DASHBOARD.md`](./DASHBOARD.md#permission-vocabulary). |
 
 ### Resource lookup
@@ -420,17 +557,38 @@ come from
 
 ## Logging and observability
 
-The server emits structured JSON logs via `tracing`. Useful filters:
+The server emits `tracing` logs — `text` by default, `json` when `GUARDIAN_LOG_FORMAT=json` (see [`CONFIGURATION.md`](./CONFIGURATION.md#logging)). `text` uses ANSI colors only when stdout is a TTY; `json` emits flattened JSON with span context for CloudWatch Logs Insights.
+
+Hot-path service handlers emit request events at `debug` — enable them with `RUST_LOG=server=debug` or `RUST_LOG=server::services=debug`. At the default `info` filter each request emits one span-close line instead, carrying the span's fields (account ID, nonce, commitment, signer/match counts) and `time.busy` / `time.idle`:
+
+```
+2026-08-19T11:53:31.172132Z  INFO push_delta_proposal{account_id="0x1234…" nonce=7 commitment="0xabcd…" signer_count=2}: server::services::push_delta_proposal: close time.busy=4.1ms time.idle=112µs
+```
+
+That line is emitted whether the request succeeded or failed. This matters because the centralized error lines (`guardian error (HTTP 5xx)`, `guardian error (gRPC internal)`) are emitted from the `GuardianError` → response conversion, which runs after the service span has closed: they carry `code` and `detail` only, and the immediately preceding close line is what identifies the account. Low-volume domain milestones (`Account configured`, `Delta proposal created`, `Delta proposal signed`) keep their own `info` line.
+
+`resolve_account` is a nested helper rather than a request boundary, so its span is `debug` and it contributes no close line at `info`.
+
+The per-read `Commitment mismatch during state verification` (`network::miden`) is also `debug`; persistent divergence is surfaced by the canonicalization processor's streak-gated WARN (confirmed divergence), not the per-read log.
+
+Useful filters:
 
 ```bash
-# Watch canonicalization worker decisions
+# Watch canonicalization worker decisions (including confirmed divergence WARN)
 RUST_LOG=server::jobs::canonicalization=debug
+
+# Watch per-request debug events
+RUST_LOG=server=debug
+RUST_LOG=server::services=debug
 
 # Watch auth verifier rejections
 RUST_LOG=server::middleware::auth=debug,server::metadata::auth=debug
 
 # Watch dashboard authz
 RUST_LOG=server::dashboard=debug
+
+# JSON output for CloudWatch
+GUARDIAN_LOG_FORMAT=json RUST_LOG=info cargo run -p guardian-server
 ```
 
 ### Startup configuration banner
@@ -447,7 +605,7 @@ network network=MidenTestnet rpc_endpoint="https://rpc.testnet.miden.io"
 storage backend storage=Postgres
 ack signers falcon="enabled" falcon_commitment=0x… ecdsa_backend="aws-kms" ecdsa_commitment=0x…
 dashboard operators=0 cursor_secret="ephemeral"
-canonicalization check_interval_seconds=10 fast_promotion_enabled=true fast_promotion_interval_seconds=3 fast_promotion_window_seconds=30 max_retries=48 submission_grace_period_seconds=600
+canonicalization check_interval_seconds=10 fast_promotion_enabled=true fast_promotion_interval_seconds=3 fast_promotion_window_seconds=30 max_retries=48 submission_grace_period_seconds=600 max_concurrent_accounts=10
 listeners http=3000 grpc=50051
 compiled features features=["postgres"]
 =========================================

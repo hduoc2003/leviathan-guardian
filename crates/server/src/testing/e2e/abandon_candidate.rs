@@ -33,19 +33,19 @@ use guardian_shared::auth_request_message::AuthRequestMessage;
 use guardian_shared::auth_request_payload::AuthRequestPayload;
 use guardian_shared::hex::IntoHex;
 use guardian_shared::{SignatureScheme, ToJson};
-use miden_confidential_contracts::masm_builder::get_guardian_library;
 use miden_confidential_contracts::multisig_guardian::{
     MultisigGuardianBuilder, MultisigGuardianConfig,
 };
-use miden_protocol::account::{Account, AccountStorageMode};
+use miden_protocol::account::{Account, AccountType};
 use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
 use miden_protocol::utils::serde::Serializable;
-use miden_protocol::vm::AdviceInputs;
 use miden_protocol::{Felt, Word};
+use miden_standards::account::auth::{AuthGuardedMultisig, MultisigAuthArgs};
 use miden_standards::code_builder::CodeBuilder;
 use miden_testing::MockChainBuilder;
 use miden_tx::TransactionExecutorError;
 
+use super::MultisigAuthArgsExt;
 use crate::delta_object::DeltaObject;
 use crate::error::GuardianError;
 use crate::metadata::NetworkConfig;
@@ -150,8 +150,7 @@ async fn stranded_candidate_setup(landed: bool) -> StrandedCandidateSetup {
         .collect();
 
     let config = MultisigGuardianConfig::new(2, signer_commitments, ack_commitment_word)
-        .with_storage_mode(AccountStorageMode::Public)
-        .with_guardian_enabled(true)
+        .with_account_type(AccountType::Public)
         .with_signature_scheme(SignatureScheme::Falcon);
     let multisig_account = MultisigGuardianBuilder::new(config)
         .build_existing()
@@ -170,30 +169,28 @@ async fn stranded_candidate_setup(landed: bool) -> StrandedCandidateSetup {
     // TransactionSummary the wallet pushes as the delta payload.
     let new_guardian_key = SecretKey::new();
     let new_guardian_commitment = new_guardian_key.public_key().to_commitment();
-    let advice_inputs =
-        AdviceInputs::default().with_stack(new_guardian_commitment.as_elements().iter().copied());
-    let guardian_library = get_guardian_library().expect("guardian library compiles");
+    let new_guardian_scheme_id = SignatureScheme::Falcon.auth_scheme_id();
+    let tx_script_code = format!(
+        "@transaction_script\npub proc main\n    push.{new_guardian_commitment}\n    push.{new_guardian_scheme_id}\n    call.::miden::standards::components::auth::guarded_multisig::update_guardian_public_key\n    drop\n    dropw\nend"
+    );
     let tx_script = CodeBuilder::new()
-        .with_dynamically_linked_library(&guardian_library)
+        .with_dynamically_linked_package(AuthGuardedMultisig::code())
         .expect("library links")
-        .compile_tx_script(
-            r#"
-            use oz_guardian::guardian
-            begin
-                call.guardian::update_guardian_public_key
-            end
-            "#,
-        )
+        .compile_tx_script(&tx_script_code)
         .expect("tx script compiles");
-    let salt = Word::from([Felt::new(7); 4]);
+    // `MockChain` charges no fee and the guarded component pays none on this protocol
+    // line, so the auth args commit no conversion info. Candidate abandonment is what
+    // is under test and only needs *a* summary.
+    let auth_args = MultisigAuthArgs::new(
+        mock_chain.latest_block_header().block_num(),
+        Word::from([Felt::new_unchecked(7); 4]),
+    );
 
     let abort_summary = match mock_chain
-        .build_tx_context(multisig_account.id(), &[], &[])
-        .expect("tx context builds")
+        .build_transaction(multisig_account.id())
         .authenticator(None)
         .tx_script(tx_script)
-        .extend_advice_inputs(advice_inputs)
-        .auth_args(salt)
+        .multisig_auth_args(&auth_args)
         .build()
         .expect("tx builds")
         .execute()

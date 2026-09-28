@@ -2,6 +2,11 @@
 
 Interactive CLI that exercises the `miden-multisig-client` SDK end-to-end: generate keys, create/register multisig accounts, list notes, coordinate proposals, export/import offline files, and execute transactions.
 
+On a fee-charging chain (`verification_base_fee` non-zero) fund the demo account with the
+native fee asset before the first execute: the guarded auth procedure pays the fee before
+the transaction summary exists, so an unfunded vault aborts there rather than reaching
+signing.
+
 ## Requirements
 
 - Guardian server (default `http://localhost:50051`)
@@ -21,12 +26,13 @@ once.
 
 ## Typical Flow
 
-1. Generate Falcon keypair (shows your signer commitment).
+1. Generate a keypair (shows your signer commitment). The prompt defaults to Falcon; pick ECDSA when the target Guardian restricts new accounts with `GUARDIAN_ALLOWED_ACCOUNT_SCHEMES=ecdsa` (the production templates do), otherwise registration fails with `signature_scheme_not_allowed`.
 2. Create multisig account (choose threshold and enter cosigner commitments).
 3. Register the account on GUARDIAN (makes it visible to other cosigners).
 4. Pull/register the account from another terminal and sign proposals.
 5. Create proposals (transfer, consume notes, switch GUARDIAN) and gather signatures.
 6. Execute once the threshold is satisfied, or export/import proposals for offline signing.
+7. After recovering an account on a fresh device (`r` then a sync/pull), run `n` — "Recover notes" — to restore pending notes via the transport drain, proposal import, and public backfill in one flow.
 
 All of these steps are surfaced via the interactive menu—run it in multiple terminals to simulate different cosigners.
 

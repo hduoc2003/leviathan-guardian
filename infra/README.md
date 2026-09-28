@@ -25,6 +25,21 @@ Resources created:
 - Security groups for the ALB, server task, and database
 - CloudWatch log groups
 - IAM roles for ECS task execution and runtime
+- ADOT Collector sidecar in the server task exporting Guardian Prometheus metrics to CloudWatch (EMF)
+- CloudWatch dashboard (`<stack>-server`) and alarms (error rate, latency, canonicalization, metrics pipeline, ECS saturation)
+- Optional SNS topic (`<stack>-alarms`) receiving every alarm's ALARM/OK transitions, and an optional Amazon Q Developer in chat applications (formerly AWS Chatbot) Slack channel configuration subscribed to it (`alerting.tf`)
+- CloudWatch Logs metric filters counting the server's ERROR (and, with the dashboard, WARN) log lines, with an alarm on sustained ERROR output (independent of the metrics pipeline; requires JSON logs)
+
+The Guardian metrics endpoint binds loopback inside the task's shared network
+namespace; only the sidecar can reach it — it is never exposed via the ALB or
+security groups. See `observability.tf` and
+[`docs/SERVER_AWS_DEPLOY.md`](../docs/SERVER_AWS_DEPLOY.md#metrics-dashboard-and-alarms)
+for details and verification steps.
+Alarm notifications are opt-in: `alarm_notifications_enabled` creates the
+topic; adding `alarm_slack_workspace_id` and `alarm_slack_channel_id` routes it
+to a per-environment Slack channel. The Slack workspace must be authorized once
+in the Amazon Q Developer console; see
+[`docs/SERVER_AWS_DEPLOY.md`](../docs/SERVER_AWS_DEPLOY.md#alarm-notifications).
 
 ## Usage
 
@@ -115,6 +130,7 @@ server_image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/guardian-server
 # guardian_evm_rpc_urls = "1=https://ethereum-rpc.publicnode.com,11155111=https://ethereum-sepolia-rpc.publicnode.com"
 # guardian_evm_entrypoint_address = "0x433709009b8330fda32311df1c2afa402ed8d009"
 # guardian_cors_allowed_origins = "https://accounts.openzeppelin.com"
+# guardian_allowed_account_schemes = "ecdsa"   # new accounts only; recommended in production
 
 # Optional: Route 53 hosted zone ID
 # route53_zone_id = "Z1234567890ABC"
@@ -128,6 +144,12 @@ terraform init
 terraform plan
 terraform apply
 ```
+
+Image-only rollouts of a published GHCR version go through the **AWS Deploy**
+GitHub Actions workflow instead (OIDC, no local credentials or state). It also
+moves the ECR `latest` tag so the `server_image_uri` resolved by
+`scripts/aws-deploy.sh` stays in step with what is running. See
+[`docs/SERVER_AWS_DEPLOY.md`](../docs/SERVER_AWS_DEPLOY.md#deploying-a-published-image-from-github-actions).
 
 For direct prod Terraform usage, create the dashboard cursor secret before
 planning. Its value must be exactly 64 hexadecimal characters. Terraform checks
@@ -178,11 +200,19 @@ terraform output
 
 ```bash
 ALB_DNS=$(terraform output -raw alb_dns_name)
+CUSTOM_DOMAIN_URL=$(terraform output -raw custom_domain_url)
+GRPC_ENDPOINT=$(terraform output -raw grpc_endpoint)
+ALIAS_DOMAIN_URL=$(terraform output -raw alias_domain_url 2>/dev/null || true)
 
-curl "http://$ALB_DNS/"
-curl "http://$ALB_DNS/pubkey"
-curl "https://guardian.openzeppelin.com/pubkey"
-grpcurl -import-path ../crates/server/proto -proto guardian.proto -d '{}' guardian.openzeppelin.com:443 guardian.Guardian/GetPubkey
+# ACM certificates never cover the raw ALB hostname, so the direct checks
+# stay on plain HTTP; on HTTPS stacks they return the 301 redirect and the
+# hostname checks below verify TLS end to end.
+curl --fail-with-body "http://$ALB_DNS/"
+curl --fail-with-body "http://$ALB_DNS/pubkey"
+[ -z "$CUSTOM_DOMAIN_URL" ] || curl --fail-with-body "$CUSTOM_DOMAIN_URL/pubkey"
+[ -z "$GRPC_ENDPOINT" ] || grpcurl -import-path ../crates/server/proto -proto guardian.proto -d '{}' "${GRPC_ENDPOINT#https://}:443" guardian.Guardian/GetPubkey
+[ -z "$ALIAS_DOMAIN_URL" ] || curl --fail-with-body "$ALIAS_DOMAIN_URL/pubkey"
+[ -z "$ALIAS_DOMAIN_URL" ] || grpcurl -import-path ../crates/server/proto -proto guardian.proto -d '{}' "${ALIAS_DOMAIN_URL#https://}:443" guardian.Guardian/GetPubkey
 ```
 
 ### 6. Destroy
@@ -220,6 +250,7 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `guardian_evm_rpc_urls_secret_arn` | `""` | Existing EVM RPC URLs secret ARN; takes precedence over the managed value |
 | `guardian_evm_entrypoint_address` | `""` | Shared EVM EntryPoint address injected into the server task |
 | `guardian_cors_allowed_origins` | `""` | Comma-separated explicit HTTP origins allowed by credentialed CORS |
+| `guardian_allowed_account_schemes` | `""` (every scheme) | Comma-separated signature schemes new accounts may register with (`falcon`, `ecdsa`); the production checklist recommends `ecdsa`. Existing accounts unaffected |
 | `vpc_id` | (default VPC) | VPC ID |
 | `subnet_ids` | (all subnets in VPC) | Subnet IDs for ECS tasks and ALB |
 | `rds_proxy_subnet_ids` | filtered `subnet_ids` | Optional dedicated subnet IDs for RDS Proxy |
@@ -236,7 +267,11 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `rds_proxy_enabled` | `false` in dev, `true` in prod | Whether RDS Proxy is enabled |
 | `domain_name` | `openzeppelin.com` | Root domain for HTTPS endpoint |
 | `subdomain` | `guardian` | Subdomain for HTTPS endpoint |
+| `acm_certificate_arn` | `""` | ACM certificate for the canonical hostname |
 | `route53_zone_id` | `""` | Route 53 hosted zone ID for the domain |
+| `cloudflare_zone_id` | `""` | Cloudflare zone ID for the canonical hostname |
+| `alias_subdomain` | `""` | Migration-only legacy subdomain under `domain_name`; leave empty normally |
+| `alias_acm_certificate_arn` | `""` | Migration-only distinct legacy certificate attached through SNI |
 | `alb_ingress_cidrs` | `["0.0.0.0/0"]` | CIDR blocks allowed to reach the ALB |
 | `server_cpu` | `512` | Server task CPU units |
 | `server_memory` | `1024` | Server task memory (MB) |
@@ -252,7 +287,22 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `guardian_db_pool_max_size` | `16` in dev, `32` in prod | Guardian storage DB pool size |
 | `guardian_metadata_db_pool_max_size` | matches storage by default | Guardian metadata DB pool size |
 | `guardian_canonicalization_fast_promotion_enabled` | `true` | Enables the recent-candidate promotion-only pass in the ECS task definition |
-| `log_retention_days` | `7` | CloudWatch log retention in days |
+| `guardian_log_format` | `json` | Log format for `GUARDIAN_LOG_FORMAT` (`text`, `json`, `compact`) |
+| `log_retention_days` | `7` | CloudWatch log retention in days for the cluster and server groups (prod pins them to 365) and for the EMF metrics group |
+| `guardian_metrics_enabled` | `true` | Guardian Prometheus metrics endpoint (loopback-only inside the task) |
+| `cloudwatch_metrics_enabled` | `true` | ADOT sidecar + EMF export + CloudWatch dashboard/metric-based alarms (cascades off when the endpoint is disabled; the log-based alarm is gated separately) |
+| `adot_image` | pinned ADOT Collector release | Digest-pinned sidecar image |
+| `metrics_namespace` | `<Title(stack_name)>/Server` | CloudWatch namespace for application metrics |
+| `alarm_actions` | `[]` | ARNs (e.g. SNS topics) notified on alarm/ok transitions, in addition to the managed topic |
+| `alarm_notifications_enabled` | `false` | Create the `<stack>-alarms` SNS topic and route every alarm to it |
+| `alarm_slack_workspace_id` | `""` | Authorized Slack workspace ID (`T...`) for the Amazon Q chat channel configuration; set with the channel ID |
+| `alarm_slack_channel_id` | `""` | Slack channel ID (`C...`) receiving this stack's alarm notifications; requires `alarm_notifications_enabled` |
+| `alarm_error_rate_threshold_percent` | `5` | HTTP 5xx / gRPC error-rate alarm threshold |
+| `alarm_latency_threshold_seconds` | `1` | Average HTTP latency alarm threshold |
+| `alarm_cpu_threshold_percent` | `85` | ECS CPU saturation alarm threshold |
+| `alarm_memory_threshold_percent` | `90` | ECS memory saturation alarm threshold |
+| `cloudwatch_log_alarms_enabled` | `true` | ERROR log metric filter on the server log group + log-errors alarm (plus a WARN filter when the dashboard exists); requires `guardian_log_format = "json"` (plan-time check) |
+| `alarm_log_error_threshold` | `0` | ERROR log lines per 5-minute period tolerated before a period counts as breaching (two consecutive periods alarm) |
 
 ## Outputs
 
@@ -260,7 +310,8 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 |--------|-------------|
 | `alb_dns_name` | ALB DNS name for accessing the server |
 | `alb_url` | Full URL (http or https) |
-| `custom_domain_url` | Custom domain URL when configured |
+| `custom_domain_url` | Canonical service URL: https with a certificate, http when Terraform manages only the DNS record |
+| `alias_domain_url` | Migration-only legacy domain URL |
 | `grpc_endpoint` | Public gRPC endpoint when HTTPS is enabled |
 | `database_endpoint` | RDS endpoint used by the server |
 | `rds_proxy_endpoint` | RDS Proxy endpoint when enabled |
@@ -273,6 +324,7 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `guardian_evm_rpc_urls_secret_arn` | Secrets Manager ARN used for EVM RPC URLs |
 | `guardian_evm_entrypoint_address` | Shared EVM EntryPoint address configured for the server |
 | `guardian_cors_allowed_origins` | Explicit CORS origins configured for the server |
+| `guardian_allowed_account_schemes` | Signature schemes new accounts may register with (`GUARDIAN_ALLOWED_ACCOUNT_SCHEMES`) |
 | `ack_falcon_secret_name` | Secrets Manager name for the Falcon ack key |
 | `ack_ecdsa_secret_name` | Secrets Manager name for the ECDSA ack key |
 | `dashboard_cursor_secret_name` | Secrets Manager name for the shared dashboard cursor key |
@@ -284,6 +336,19 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `guardian_max_replicas` | Effective `GUARDIAN_MAX_REPLICAS` after clamping to steady-state capacity |
 | `guardian_dashboard_commitment_rate_burst_per_sec` | Effective fleet-wide dashboard per-commitment burst budget |
 | `guardian_dashboard_commitment_rate_per_min` | Effective fleet-wide dashboard per-commitment sustained budget |
+| `guardian_metrics_enabled` | Whether the Guardian Prometheus metrics endpoint is enabled |
+| `cloudwatch_metrics_enabled` | Whether the metrics sidecar, dashboard, and metric-based alarms are deployed |
+| `metrics_missing_alarm_name` | Name of the metrics-pipeline heartbeat alarm |
+| `metrics_namespace` | CloudWatch namespace receiving Guardian application metrics |
+| `metrics_dashboard_name` | CloudWatch dashboard name |
+| `metrics_emf_log_group` | Log group the ADOT sidecar writes EMF metric events into |
+| `alarm_actions` | Effective ARNs notified on alarm/ok transitions |
+| `alarm_sns_topic_arn` | Managed alarm SNS topic ARN, empty when not enabled |
+| `alarm_slack_configuration_name` | Amazon Q Slack channel configuration name (error log group `/aws/chatbot/<name>`), empty when not configured |
+| `alarm_slack_configuration_arn` | Amazon Q Slack channel configuration ARN, empty when not configured |
+| `cloudwatch_log_alarms_enabled` | Whether the ERROR log metric filter and log-errors alarm are deployed |
+| `log_metrics_namespace` | CloudWatch namespace receiving the log-level metric-filter counts (`<metrics_namespace>/Logs`) |
+| `server_log_errors_alarm_name` | Name of the alarm on ERROR-level server log lines |
 
 ## Stage Profiles
 
@@ -306,7 +371,7 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 
 ## HTTPS Configuration
 
-HTTPS is enabled when `acm_certificate_arn` is set. DNS can be managed through Cloudflare, Route 53, or both depending on which variables are provided. In the current `guardian-stg` deployment, Terraform state shows Cloudflare DNS management and no Route 53 record.
+HTTPS is enabled when `acm_certificate_arn` is set. DNS can be managed through Cloudflare, Route 53, both, or an external provider. Terraform creates canonical and migration-only alias records only for the configured providers; external records remain operator-managed. The migration-only secondary-subdomain settings are covered in [`docs/runbooks/guardian-domain-migration.md`](../docs/runbooks/guardian-domain-migration.md).
 
 When HTTPS is enabled, the ALB routes standard HTTPS requests to the server HTTP port `3000` and gRPC requests for `/guardian.Guardian/*` to the server gRPC port `50051`. The public gRPC endpoint uses the same hostname on port `443`.
 

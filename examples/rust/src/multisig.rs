@@ -1,5 +1,6 @@
 use std::fmt;
 
+use guardian_shared::SignatureScheme;
 use miden_client::account::Account;
 use miden_client::assembly::CodeBuilder;
 use miden_client::transaction::{
@@ -7,13 +8,16 @@ use miden_client::transaction::{
     TransactionRequestBuilder, TransactionRequestError, TransactionScript, TransactionSummary,
 };
 use miden_client::{Client, ClientError, Deserializable, Word};
-use miden_confidential_contracts::masm_builder::get_multisig_library;
 use miden_confidential_contracts::multisig_guardian::{
     MultisigGuardianBuilder, MultisigGuardianConfig,
 };
 use miden_protocol::account::auth::Signature;
 use miden_protocol::account::AccountId;
+use miden_protocol::assembly::Package;
+use miden_protocol::crypto::SequentialCommit;
 use miden_protocol::{Felt, Hasher};
+use miden_standards::account::auth::MultisigAuthArgs;
+use miden_standards::StandardsLib;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -106,16 +110,23 @@ pub fn build_multisig_config_advice(
 ) -> (Word, Vec<Felt>) {
     let num_approvers = signer_commitments.len() as u64;
 
-    let mut payload = Vec::with_capacity(4 + signer_commitments.len() * 4);
+    let mut payload = Vec::with_capacity(4 + signer_commitments.len() * 8);
     payload.extend_from_slice(&[
-        Felt::new(threshold),
-        Felt::new(num_approvers),
-        Felt::new(0),
-        Felt::new(0),
+        Felt::new_unchecked(threshold),
+        Felt::new_unchecked(num_approvers),
+        Felt::new_unchecked(0),
+        Felt::new_unchecked(0),
     ]);
 
+    // Upstream interleaves [PUB_KEY, SCHEME_ID] per approver, in reverse index order.
     for commitment in signer_commitments.iter().rev() {
         payload.extend_from_slice(commitment.as_elements());
+        payload.extend_from_slice(&[
+            Felt::new_unchecked(SignatureScheme::Falcon.auth_scheme_id()),
+            Felt::new_unchecked(0),
+            Felt::new_unchecked(0),
+            Felt::new_unchecked(0),
+        ]);
     }
 
     let config_hash: Word = Hasher::hash_elements(&payload);
@@ -124,18 +135,18 @@ pub fn build_multisig_config_advice(
 
 #[allow(dead_code)]
 pub fn build_update_signers_script() -> Result<TransactionScript, String> {
-    let multisig_library =
-        get_multisig_library().map_err(|err| format!("Failed to get multisig library: {err}"))?;
+    let multisig_library: Package = StandardsLib::default().into();
 
     let tx_script_code = "
-        use oz_multisig::multisig
-        begin
+        use miden::standards::auth::multisig
+        @transaction_script
+        pub proc main
             call.multisig::update_signers_and_threshold
         end
     ";
 
     let tx_script = CodeBuilder::new()
-        .with_dynamically_linked_library(multisig_library)
+        .with_dynamically_linked_package(multisig_library)
         .map_err(|err| format!("Failed to link multisig library: {err}"))?
         .compile_tx_script(tx_script_code)
         .map_err(|err| format!("Failed to compile transaction script: {err}"))?;
@@ -150,7 +161,7 @@ pub fn build_update_signers_script() -> Result<TransactionScript, String> {
 pub fn build_update_signers_transaction_request<I>(
     threshold: u64,
     signer_commitments: &[Word],
-    salt: Word,
+    auth_args: &MultisigAuthArgs,
     extra_advice: I,
 ) -> Result<(TransactionRequest, Word), MultisigError>
 where
@@ -159,12 +170,18 @@ where
     let (config_hash, config_values) = build_multisig_config_advice(threshold, signer_commitments);
     let script = build_update_signers_script().map_err(MultisigError::Assembly)?;
 
+    // Since Miden 0.17 the multisig reads its auth arg as the commitment to a three-word
+    // preimage (bound block + expiration, salt, fee conversion info) carried in the advice
+    // map. A declared `fee_conversion_salt` would let miden-client commit its own auth arg
+    // over this one.
+    let auth_args_commitment = auth_args.to_commitment();
     let request = TransactionRequestBuilder::new()
         .custom_script(script)
         .script_arg(config_hash)
         .extend_advice_map([(config_hash, config_values)])
+        .extend_advice_map([(auth_args_commitment, auth_args.to_elements())])
         .extend_advice_map(extra_advice)
-        .auth_arg(salt)
+        .auth_arg(auth_args_commitment)
         .build()?;
 
     Ok((request, config_hash))
@@ -177,7 +194,7 @@ pub fn build_signature_advice_entry(
     signature: &Signature,
 ) -> (Word, Vec<Felt>) {
     let key = Hasher::merge(&[pubkey_commitment, message]);
-    let values = signature.to_prepared_signature(message);
+    let values = signature.to_encoded_signature(message);
     (key, values)
 }
 
@@ -185,6 +202,7 @@ pub fn build_signature_advice_entry(
 /// Executes the provided transaction request against the given account. If authentication fails
 /// with `Unauthorized`, the contained `TransactionSummary` is returned. Any other execution
 /// result (including success) is surfaced as an error.
+#[allow(clippy::result_large_err)]
 pub async fn execute_transaction_for_summary<AUTH>(
     client: &mut Client<AUTH>,
     account_id: AccountId,

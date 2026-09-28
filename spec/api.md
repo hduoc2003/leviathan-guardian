@@ -13,8 +13,32 @@
 
 - The signed payload includes a Unix timestamp in milliseconds.
 - The server enforces a maximum clock skew window of **300,000 milliseconds** (5 minutes).
-- The server tracks `last_auth_timestamp` per account; requests with a timestamp less than or equal to the last accepted timestamp are rejected.
-- `last_auth_timestamp` is updated atomically when authentication succeeds.
+- The server tracks `last_auth_timestamp` per `(account, signer commitment)`; a request whose timestamp is not strictly greater than the last accepted timestamp from the same signer is rejected with the dedicated stable code `authentication_replay` (HTTP 401 / gRPC `Unauthenticated`, `meta.retryable: true`). Independent authorized signers never contend on one timestamp, while a replayed request from the same signer always loses: every accepted request advances that signer's own record.
+- All other authentication failures (clock skew, invalid or unauthorized signature, malformed credentials) share the terminal code `authentication_failed` (`meta.retryable: false`). Clients MUST branch on the stable code, never on message text.
+- `last_auth_timestamp` is updated atomically (compare-and-swap) when authentication succeeds.
+- `POST /configure` enforces the same timestamp skew and replay CAS. A first-time
+  configuration seeds the verified signer's floor once the account metadata row
+  exists; reconfiguration consumes the timestamp before changing stored state.
+  The first-time seed is deliberately post-write because replay state has a
+  foreign key to account metadata. A crash in that narrow interval can leave the
+  new account without a floor, allowing any captured, still-fresh request signed
+  by that signer to initialize the floor and execute. Replaying the configure
+  itself only idempotently re-submits the same state, but the bounded first-write
+  window applies to other signed routes too. Concurrent first configurations are
+  not serialized across different signers; callers must not use `/configure` as
+  a general concurrent state-update mechanism.
+- Migrated stores retain the former account-scoped value as a lower bound for
+  signers first seen later, preventing a removed signer from regaining a replay
+  window when it is authorized again.
+- Clients generate strictly increasing timestamps per instance (`max(now_ms, previous + 1)`) and retry only `authentication_replay`, bounded, with a fresh timestamp, recomputed digest, and fresh signature over the identical payload on each attempt. Terminal authentication failures are never retried.
+- During a mixed server/client rollout, a replay CAS reported under the older
+  authentication code—or received by a client without replay-specific retry
+  handling—can surface as a terminal 401. Current clients retry only
+  `authentication_replay` and never retry `authentication_failed`.
+- HTTP `/configure` failures use the standard API error envelope
+  (`{ code, message, meta }`), not `ConfigureResponse` with `success: false`.
+  Direct HTTP consumers that inspect the old error body must migrate with the
+  server rollout. The shared protobuf response fields remain for gRPC.
 
 ### Miden Request Signing
 
@@ -155,6 +179,8 @@ Miden delta proposals use:
 
 `p2id` metadata carries `recipient_id`, `faucet_id`, `amount`, and an optional `note_type` (`"public"` or `"private"`, issue #322). Clients emit `note_type` only when the note is private; an absent field means public, which keeps proposals created before the field existed valid. The value is part of the signed metadata: verifiers rebuild the transaction from it, so a tampered `note_type` fails the tx_summary commitment check.
 
+`p2id` metadata may additionally carry `reclaim_height` and/or `timelock_height` (issue #366): absolute `u32` block heights that make the proposal create a P2IDE note instead of a plain P2ID note (`reclaim_height` lets the sender reclaim an unconsumed note from that block on; `timelock_height` blocks consumption before that block). Presence of either field selects P2IDE; both absent means plain P2ID, which keeps pre-existing proposals valid. `0` is rejected because it is the on-chain encoding for "no constraint". Like `note_type`, the heights are part of the signed metadata and a tampered value fails the tx_summary commitment check.
+
 EVM proposals use EVM-specific request and response shapes under `/evm/proposals`. They do not use `DeltaObject` or the `/delta/proposal` envelope.
 
 EVM proposal creation request:
@@ -279,9 +305,12 @@ component schemas.
 | client | `POST /delta` | signed headers | Push a signed single-key delta |
 | client | `GET /delta` | signed headers | Fetch the delta at a nonce |
 | client | `GET /delta/since` | signed headers | Merged delta since a nonce |
+| client | `GET /delta/history` | signed headers | Paginated canonical delta history with decoded note summaries |
 | client | `GET /state` | signed headers | Latest canonical state |
 | client | `GET /state/lookup` | lookup signing (PoP) | Resolve a key commitment to account IDs |
 | client | `GET /pubkey` | public | ACK public key / commitment |
+| client | `GET /status` | public | Server liveness, version, environment, uptime |
+| client | `GET /` | public | Alias of `GET /status` |
 | client | `POST /delta/proposal` | signed headers | Create a multisig proposal |
 | client | `GET /delta/proposal` | signed headers | List pending proposals |
 | client | `GET /delta/proposal/single` | signed headers | Fetch one proposal by commitment |
@@ -299,6 +328,8 @@ component schemas.
 | dashboard | `POST /dashboard/accounts/{account_id}/pause` | session + `accounts:pause` | Pause an account |
 | dashboard | `POST /dashboard/accounts/{account_id}/unpause` | session + `accounts:pause` | Unpause an account |
 | dashboard | `GET /dashboard/info` | session + `dashboard:read` | Inventory & lifecycle summary |
+| dashboard | `GET /dashboard/stats` | session + `dashboard:read` | Account counts, Miden asset totals, and coverage in one request |
+| dashboard | `POST /dashboard/stats/refresh` | session + `stats:refresh` | Request an out-of-cycle refresh of the stats aggregate (202) |
 | dashboard | `GET /dashboard/session` | session | Session introspection |
 | dashboard | `GET /dashboard/deltas` | session + `dashboard:read` | Cross-account delta feed |
 | dashboard | `GET /dashboard/proposals` | session + `dashboard:read` | Cross-account proposal feed |
@@ -323,14 +354,28 @@ is built with the `evm` feature.
 
 Semantics not captured by the OpenAPI shapes:
 
-- **Pagination.** Paginated dashboard endpoints return
-  `{ items, next_cursor }`; `limit` defaults to 50 and is capped at 500
-  (`invalid_limit` outside `[1, 500]`). Cursors are opaque and signed;
-  tampered/stale cursors return `invalid_cursor`. Per-account feeds key
-  the cursor on immutable fields (`nonce`, `(nonce, commitment)`) and are
-  fully stable; cross-account feeds order by `status_timestamp` /
+- **Pagination.** Paginated endpoints (the dashboard feeds and the
+  client `GET /delta/history`) return `{ items, next_cursor }`; `limit`
+  defaults to 50 and is capped at 500 (`invalid_limit` outside
+  `[1, 500]`). Cursors are opaque and signed, scoped to the issuing
+  endpoint; tampered/stale/cross-endpoint cursors return
+  `invalid_cursor`. Per-account feeds key the cursor on immutable
+  fields (`nonce`, `(nonce, commitment)`) and are fully stable;
+  cross-account feeds order by `status_timestamp` /
   `originating_timestamp` and MAY skip or repeat an entry whose timestamp
   is bumped mid-traversal (FR-005).
+- **`GET /delta/history`.** Canonical deltas only, newest-first by nonce. Each
+  entry carries an explicit `status` (always `canonical` today; the closed set
+  widens if the feed gains a `status=` filter) and decoded notes carry
+  `note_type` (`public` / `private`) from the on-chain note metadata, with
+  input/output note summaries decoded server-side from the stored
+  `TransactionSummary`. An entry whose payload cannot be decoded is
+  still returned, with empty note sections and a `decode_warnings`
+  item. Read-only: served while the account is paused. Only
+  transactions pushed through Guardian appear — history of
+  transactions the account executed elsewhere is not visible to it.
+  EVM-configured accounts are rejected with `unsupported_for_network`,
+  like the other Miden delta APIs.
 - **`/state/lookup`.** An empty `accounts` list is a successful response,
   not a 404 — distinguishing "no account" from "wrong key" would leak
   account presence to non-key-holders. Authentication is proof-of-possession
@@ -340,10 +385,41 @@ Semantics not captured by the OpenAPI shapes:
   (FR-017); the account snapshot returns `unsupported_for_network` for EVM
   accounts (no Miden vault to decode).
 - **Aggregate degradation.** On the filesystem backend, cross-account
-  aggregates (`/dashboard/info`, `/dashboard/deltas`, `/dashboard/proposals`)
-  short-circuit to `data_unavailable` (503) above the configured
-  `filesystem_aggregate_threshold` (default 1,000 accounts) rather than
-  full-scan the inventory; `total_account_count` is always returned (FR-029).
+  fan-out aggregates (`/dashboard/info` delta / proposal / activity
+  fields, `/dashboard/deltas`, `/dashboard/proposals`) short-circuit to
+  `data_unavailable` (503) or a `degraded_aggregates` marker above the
+  configured `filesystem_aggregate_threshold` (default 1,000 accounts)
+  rather than full-scan the inventory (FR-029). On `/dashboard/info` the
+  threshold is applied by the `/dashboard/stats` walk that computes those
+  fields, and the affected names surface in `degraded_aggregates`;
+  `total_account_count` and `accounts_by_auth_method` are always
+  returned once a snapshot exists.
+- **Aggregate stats (`GET /dashboard/stats`, issue #371).** Served from
+  one snapshot per fleet: the holder of the `dashboard_stats` lease walks
+  the inventory every `GUARDIAN_DASHBOARD_STATS_REFRESH_INTERVAL_SECS`
+  (default 300 s) and publishes to the shared store with lease-fenced,
+  atomic publication (sealed with the storage cipher when at-rest
+  encryption is configured); every replica polls and serves the same
+  `version`. A request never reads storage or decodes a vault, and
+  reports the snapshot time as `as_of` (the interval is not a bound on
+  its age). `POST /dashboard/stats/refresh` (`stats:refresh`) queues an
+  out-of-cycle walk (`202`, `queued` / `in_progress`); requests inside
+  the 60-second cooldown are `429 rate_limit_exceeded` with
+  `Retry-After`. `?updated_since=<RFC3339>` restricts the
+  **asset** aggregate to accounts whose metadata `updated_at >=
+  updated_since` (account counts are always unfiltered; blank is
+  treated as absent; any other non-RFC3339 value is `400
+  invalid_timestamp`; percent-encode a `+` offset or use `Z`). Eligibility is Miden-only. Fungible totals are
+  base-10 decimal strings summed in 128-bit; coverage satisfies
+  `covered + Σskipped == eligible`, and any skipped account (reasons
+  `state_unavailable`, `state_undecodable`) makes `complete: false` —
+  a missing or undecodable state is never reported as a zero balance.
+  Until the first refresh after startup the endpoint returns `503
+  data_unavailable` (retryable). A walk that fails at any systemic
+  storage read keeps the previous snapshot published; a single corrupt
+  row is explicit `state_undecodable` coverage. Every cross-account
+  aggregate on `/dashboard/info` reads the same snapshot (reported as
+  `aggregates_as_of`), so the two endpoints never disagree.
 - **Account detail / snapshot.** Both are decode-only views of Guardian's
   stored state at the last-canonicalized commitment — no live Miden RPC and
   no cross-account joins. `has_pending_candidate: true` means the decoded
@@ -370,7 +446,9 @@ Stable error codes include:
 - `commitment_mismatch`
 - `invalid_commitment`
 - `authentication_failed`
+- `authentication_replay` (retryable replay-CAS rejection, see [Replay Protection](#replay-protection))
 - `authorization_failed`
+- `signature_scheme_not_allowed` (new-account registration used a scheme excluded by `GUARDIAN_ALLOWED_ACCOUNT_SCHEMES`; HTTP 403 / gRPC `PermissionDenied`, `meta.scheme` + `meta.allowed_schemes`)
 - `invalid_input`
 - `storage_error`
 - `network_error`
@@ -391,6 +469,7 @@ Stable error codes include:
 - `invalid_cursor` (dashboard pagination, see feature `005-operator-dashboard-metrics`)
 - `invalid_limit`
 - `invalid_status_filter`
+- `invalid_timestamp` (`/dashboard/stats?updated_since=` is not RFC3339, issue #371)
 - `GUARDIAN_INSUFFICIENT_OPERATOR_PERMISSION`
 - `GUARDIAN_ACCOUNT_PAUSED`
 - `data_unavailable`
@@ -418,6 +497,7 @@ The gRPC surface mirrors the Miden state/delta methods. EVM account registration
 - `GetDeltaProposal(GetDeltaProposalRequest) -> GetDeltaProposalResponse`
 - `SignDeltaProposal(SignDeltaProposalRequest) -> SignDeltaProposalResponse`
 - `GetAccountByKeyCommitment(GetAccountByKeyCommitmentRequest) -> GetAccountByKeyCommitmentResponse`
+- `GetDeltaHistory(GetDeltaHistoryRequest) -> GetDeltaHistoryResponse`
 
 Every gRPC method is rate limited from the same store as the HTTP surface;
 see [Rate Limiting](#rate-limiting) for the keying rules and the rejection
@@ -506,12 +586,16 @@ behavior.
 | `guardian_accounts_created_total` | counter | `kind` (`miden`/`evm`) |
 | `guardian_metrics_refresh_timestamp_seconds` | gauge | — |
 | `guardian_metrics_refresh_failures_total` | counter | — |
+| `guardian_dashboard_stats_refresh_timestamp_seconds` | gauge | — |
+| `guardian_dashboard_stats_refresh_failures_total` | counter | — |
+| `guardian_dashboard_stats_refresh_duration_seconds` | histogram | — |
 | `process_*` (CPU, RSS, fds, start time) | standard | — |
 
 Durations use seconds with explicit buckets from 1ms to 10s, except
 `guardian_canonicalization_run_duration_seconds`,
-`guardian_canonicalization_fast_run_duration_seconds` and
-`guardian_canonicalization_reconcile_run_duration_seconds`, which use extended
+`guardian_canonicalization_fast_run_duration_seconds`,
+`guardian_canonicalization_reconcile_run_duration_seconds` and
+`guardian_dashboard_stats_refresh_duration_seconds`, which use extended
 buckets up to 5 minutes, and
 `guardian_canonicalization_candidate_age_seconds` which spans 1 second
 to 24 hours so stuck candidates stay visible. The

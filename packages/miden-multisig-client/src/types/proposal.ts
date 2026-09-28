@@ -37,6 +37,14 @@ interface BaseProposalMetadata {
   description: string;
   saltHex?: string;
   requiredSignatures?: number;
+  /**
+   * Base64-serialized Miden `ChainAnchor` pinning the reference block the
+   * proposal's transaction summary was built at. Required to verify or
+   * execute the proposal: since protocol 0.16 the signed summary binds the
+   * reference block commitment, so it only reproduces when re-executed at
+   * that block.
+   */
+  chainAnchor?: string;
 }
 
 export interface UpdateSignersProposalMetadata extends BaseProposalMetadata {
@@ -89,6 +97,31 @@ export function isP2idNoteVisibility(value: string): value is P2idNoteVisibility
   return value === 'public' || value === 'private';
 }
 
+/** Maximum P2IDE block height: heights are `u32` on-chain (`BlockNumber`). */
+export const MAX_P2IDE_BLOCK_HEIGHT = 0xffff_ffff;
+
+/**
+ * Validates a P2IDE reclaim/timelock height (issue #366). Heights are `u32`
+ * block numbers; `0` is rejected because it is the on-chain encoding for "no
+ * constraint", so accepting it would silently build an unconstrained note.
+ * An invalid value throws rather than being dropped, which would rebuild a
+ * note that could never match the signed tx_summary commitment.
+ */
+export function parseP2ideHeight(
+  field: 'reclaimHeight' | 'timelockHeight',
+  value: number | undefined,
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || value < 1 || value > MAX_P2IDE_BLOCK_HEIGHT) {
+    throw new Error(
+      `unsupported ${field} '${value}': expected an integer between 1 and ${MAX_P2IDE_BLOCK_HEIGHT}`,
+    );
+  }
+  return value;
+}
+
 export interface P2IdProposalMetadata extends BaseProposalMetadata {
   proposalType: 'p2id';
   recipientId: string;
@@ -96,14 +129,20 @@ export interface P2IdProposalMetadata extends BaseProposalMetadata {
   amount: string;
   /** Visibility of the created note. Absent on the wire => 'public' (pre-#322 proposals). */
   noteType?: P2idNoteVisibility;
+  /**
+   * Absolute block height at which the sender may reclaim the note (issue
+   * #366). Presence of either height means the proposal creates a P2IDE note
+   * instead of a plain P2ID note; both absent => plain P2ID (pre-#366
+   * proposals).
+   */
+  reclaimHeight?: number;
+  /** Absolute block height before which the note cannot be consumed. */
+  timelockHeight?: number;
 }
 
 export interface CustomProposalMetadata extends BaseProposalMetadata {
   proposalType: 'custom';
-  /** Original server-defined proposal label, e.g. "b2agg" (issue #266). Mirrors
-   * Rust `ProposalMetadata.proposal_type`; it is what lets a custom proposal
-   * round-trip back to GUARDIAN/export, so it is required in the domain model.
-   * Any wire-level optionality is resolved in the parser/codec boundary. */
+  /** Original server-defined proposal label, preserved during round trips. */
   rawProposalType: string;
 }
 
@@ -115,11 +154,6 @@ export type ProposalMetadata =
   | P2IdProposalMetadata
   | CustomProposalMetadata;
 
-/** Only switch_guardian is authorized by the signers alone; every other type needs the guardian's ack. */
-export function supportsOfflineExecution(proposalType: ProposalType): boolean {
-  return proposalType === 'switch_guardian';
-}
-
 export interface Proposal {
   id: string;
   accountId: string;
@@ -128,6 +162,35 @@ export interface Proposal {
   txSummary: string;
   signatures: ProposalSignatureEntry[];
   metadata: ProposalMetadata;
+  /**
+   * Result of the last summary-binding check on this value. Only the check
+   * itself writes `verified`; a freshly parsed or imported proposal is
+   * `unchecked`. `syncProposals` surfaces failed proposals instead of
+   * failing wholesale (issue #462); `signProposal` and `executeProposal`
+   * re-verify and refuse them.
+   */
+  verification: ProposalVerification;
+}
+
+/**
+ * Outcome of checking a proposal's metadata against its signed summary.
+ * `failed.retryable` is true when the failure came from a transient node or
+ * RPC error, so the same proposal may verify on a later sync; false when the
+ * proposal itself cannot be reproduced (tampered metadata, an anchor block the
+ * node has pruned) and it has to be re-proposed.
+ */
+export type ProposalVerification =
+  | { status: 'unchecked' }
+  | { status: 'verified' }
+  | { status: 'failed'; retryable: boolean; message: string };
+
+/**
+ * True when the proposal is both verified and has met its signature
+ * threshold, i.e. it can be executed. `status` alone keeps meaning
+ * "threshold met": a fully signed proposal can still be dead.
+ */
+export function isProposalActionable(proposal: Proposal): boolean {
+  return proposal.verification.status === 'verified' && proposal.status === 'ready';
 }
 
 export interface TransactionProposal {

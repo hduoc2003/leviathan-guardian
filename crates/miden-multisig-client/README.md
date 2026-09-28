@@ -15,6 +15,23 @@ Miden multisig accounts store their authentication logic on-chain, but **their s
 2. Cosigners fetch pending deltas, verify details locally, sign the transaction summary, and push signatures back to GUARDIAN.
 3. Once ready, any cosigner builds the final transaction using all cosigner signatures + the GUARDIAN ack, executes it on-chain.
 
+## Miden compatibility
+
+This package's version and Miden's are **not** aligned. Pick the release that
+matches your Miden node:
+
+| This package | Miden protocol |
+|---|---|
+| 0.18.x | 0.17.x |
+| 0.17.x | 0.16.x |
+| 0.16.x | 0.15.x |
+| 0.15.x | 0.15.x |
+
+Adopting a new Miden line has twice required an irreversible reset of
+Guardian-stored account data, so an upgrade is not a drop-in. Full matrix, the
+breaking changes per line, and what each upgrade does to stored data:
+[MIDEN_COMPATIBILITY.md](https://github.com/OpenZeppelin/guardian/blob/main/docs/MIDEN_COMPATIBILITY.md).
+
 ## Installation
 
 Add the crate to your workspace (already available in this repo). From another project:
@@ -29,7 +46,7 @@ miden-multisig-client = { git = "https://github.com/OpenZeppelin/guardian", pack
 ```rust
 use miden_client::rpc::Endpoint;
 use miden_multisig_client::{MultisigClient, TransactionType};
-use miden_objects::{Word, account::AccountId};
+use miden_objects::Word;
 
 # async fn example() -> anyhow::Result<()> {
 let signer1: Word = /* your RPO Falcon commitment */ Word::default();
@@ -50,6 +67,14 @@ println!("Account registered on GUARDIAN endpoint: {}", client.guardian_endpoint
 # Ok(())
 # }
 ```
+
+On a network with a non-zero `verification_base_fee`, a new account needs the
+native fee asset before it can create or execute regular proposals. Send the
+account a note of the chain's fee asset (its faucet is the one the synced
+protocol configuration names, `synced_fee_faucet_id`), then consume that note
+through a
+`consume_notes` proposal. The bootstrap transaction can pay its fee from the
+note it consumes.
 
 ## Configuration
 
@@ -149,6 +174,21 @@ let tx = TransactionType::transfer(recipient, faucet, 1_000);
 use miden_protocol::note::NoteType;
 let tx = TransactionType::transfer_with_note_type(recipient, faucet, 1_000, NoteType::Private);
 
+// For a reclaimable and/or timelocked send use `transfer_p2ide` (issue #366):
+// presence of either height creates a P2IDE note instead of a plain P2ID note.
+// `P2ideHeights` uses `NonZeroU32` — the invalid zero height ("no constraint"
+// on-chain) is unrepresentable.
+use std::num::NonZeroU32;
+use miden_multisig_client::P2ideHeights;
+
+let tx = TransactionType::transfer_p2ide(
+    recipient, faucet, 1_000, NoteType::Public,
+    P2ideHeights {
+        reclaim: NonZeroU32::new(500_000), // sender may reclaim from this block on
+        timelock: None,                    // no consume-not-before constraint
+    },
+);
+
 // Proposer creates the delta on GUARDIAN
 let proposal = client.propose_transaction(tx).await?;
 
@@ -163,6 +203,32 @@ client.sign_proposal(&to_sign.id).await?;
 // Once threshold is met, any cosigner can execute
 client.execute_proposal(&proposal.id).await?;
 ```
+
+### Proposal verification status
+
+`list_proposals` checks every proposal's metadata against its signed
+summary and records the outcome in `proposal.verification`
+(`ProposalVerification::Unchecked | Verified | Failed { retryable, message }`).
+A proposal that fails the check is still listed, so one stale or corrupt
+proposal cannot hide the others; only the check itself writes `Verified`,
+and a freshly parsed or imported proposal is `Unchecked`.
+`Failed { retryable: true }` means the re-execution hit a transient node
+error and the proposal may verify on the next listing; `retryable: false`
+means it cannot be reproduced (tampered metadata, or an anchor block the
+node has pruned) and has to be re-proposed. Verification is deliberately
+not part of `ProposalStatus`: a fully signed proposal can be dead, so
+`Ready` keeps meaning "threshold met" and `proposal.is_actionable()`
+answers "verified and ready". `sign_proposal` and `execute_proposal`
+re-verify the one proposal they act on and fail with the real error. A
+payload that does not parse at all still fails the listing, so malformed
+GUARDIAN data is never silently dropped.
+
+Anchored re-execution needs the node to serve account state at the
+proposal's reference block, and nodes keep that history only briefly
+(devnet: about 50 blocks); once it is gone the proposal is reported as
+`Failed { retryable: false }` for everyone, the proposer included.
+Collect signatures and execute promptly, and re-propose once a proposal
+has aged out.
 
 ### Recovering From a Dead Transaction (Abandon)
 
@@ -247,7 +313,6 @@ let filter = NoteFilter::by_faucet_min_amount(faucet, 5_000);
 let spendable = client.list_consumable_notes_filtered(filter).await?;
 ```
 
-
 ### Custom Proposal Types
 
 GUARDIAN accepts any non-empty `proposal_type`, so an integration can propose a
@@ -263,30 +328,181 @@ on-chain transaction — the integration owns that recipe and drives execution.
 
 ```rust
 use miden_client::Serializable;
-use miden_multisig_client::{build_p2id_transaction_request, generate_salt};
+use miden_multisig_client::{
+    build_p2id_transaction_request, generate_salt, P2ideHeights,
+};
 use miden_protocol::note::NoteType;
 
-// Producer: build a transaction and propose it under a custom label.
+// Producer: build a transaction and propose it under a custom label. The account's
+// auth procedure reads three words out of the request's auth argument since Miden
+// 0.17 (bound block and approval expiration, salt, fee conversion info); the client
+// builds them, bound to its sync height, and the builder attaches them. Sync first:
+// `propose_custom_transaction` anchors the proposal at that same height and does
+// not sync again, because a sync between build and propose would move the anchor
+// past the block the request binds.
+client.sync().await?;
 let salt = generate_salt();
+let auth_args = client.multisig_auth_args(salt, None, None).await?;
 let mut request = build_p2id_transaction_request(
-    account.inner(), recipient, vec![asset], NoteType::Public, salt, std::iter::empty(),
+    account.inner(),
+    recipient,
+    vec![asset],
+    NoteType::Public,
+    P2ideHeights::default(),
+    &auth_args,
+    std::iter::empty(),
 )?;
 let proposal = client.propose_custom_transaction(&request.to_bytes(), "b2agg").await?;
+let bound_block_num = proposal.metadata.chain_anchor()?.block_num();
 
 // Cosigners review and sign through the usual list/sign flow.
 
-// Producer (once threshold is met): bind-check the request, fetch the validated
-// advice, inject it into the request, and submit. `prepare_custom_execution`
-// verifies the request against the signed commitment *before* the GUARDIAN ack.
+// Producer (once threshold is met): rebuild the request from the recipe at the
+// proposal's anchor block, bind-check it, fetch the validated advice, inject it,
+// and submit. `prepare_custom_execution` verifies the request against the signed
+// commitment *before* the GUARDIAN ack, re-executing at the proposal's anchored
+// reference block; `submit_transaction` takes the proposal id to execute at that
+// same anchor, since the collected signatures only authorize the summary produced
+// there.
+let auth_args = client.multisig_auth_args(salt, Some(bound_block_num), None).await?;
+let mut request = build_p2id_transaction_request(
+    account.inner(), recipient, vec![asset], NoteType::Public, P2ideHeights::default(),
+    &auth_args, std::iter::empty(),
+)?;
 let advice = client.prepare_custom_execution(&proposal.id, &request.to_bytes()).await?;
 request.advice_map_mut().extend(advice);
-client.submit_transaction(request).await?;
+client.submit_transaction(&proposal.id, request).await?;
 ```
 
-The integration keeps only its own recipe (build inputs + salt) so it can
-reproduce the exact transaction at execute time — the SDK does not store the
-serialized request. The binding check guarantees the rebuilt transaction matches
-the commitment the cosigners signed.
+The integration keeps its own recipe (build inputs + salt + the proposal's anchor
+block) so it can reproduce the exact transaction at execute time — the SDK does
+not store the serialized request. The binding check guarantees the rebuilt
+transaction matches the commitment the cosigners signed.
+
+Every exported transaction builder takes the `MultisigAuthArgs` and attaches them
+with `TransactionRequestBuilderExt::multisig_auth_args`: the commitment becomes the
+request's auth argument
+and the preimage goes into the advice map, which `miden-client` then leaves alone.
+A producer assembling a different custom request directly with
+`TransactionRequestBuilder` must do the same, and must not call
+`fee_conversion_salt`, which would let `miden-client` commit its own auth arg
+over them (the module docs of `transaction/auth_args.rs` explain what it
+commits today and why that does not fit). An approval expiration
+(1 to 65535 blocks, the furthest a transaction can expire after its reference
+block) is opt-in through `ProposalOptions::approval_expiration_delta` on
+`propose_transaction_with_options`, or the third argument of
+`multisig_auth_args` for a custom request; a rebuild reads the expiration the
+summary binds back with `summary_approval_expiration_block_num`.
+
+## Delta History
+
+Render the account's confirmed history after recovery. One
+`HistoryPage` per call, newest-first by nonce, with typed note summaries:
+
+```rust
+let mut cursor: Option<String> = None;
+loop {
+    let page = client.delta_history(Some(50), cursor.take()).await?;
+    for entry in &page.entries {
+        // entry.status is HistoryEntryStatus::Canonical; notes carry a
+        // typed tag, visibility, assets, and counterparties.
+        println!("{} at {}", entry.nonce, entry.timestamp);
+    }
+    match page.next_cursor {
+        Some(next) => cursor = Some(next),
+        None => break,
+    }
+}
+```
+
+Only canonical (confirmed) deltas appear — pending proposals live on
+`list_proposals()` — and only transactions pushed through Guardian are
+visible to it.
+
+## Recovering Notes After Device Loss
+
+Normal forward sync cannot see notes that landed behind the store's
+cursors. After `pull_account` on a recovered account, `recover_notes` runs
+the three recovery strategies as one flow — the private-note transport
+drain, the proposal-embedded note import, and the historical public-note
+backfill — and finishes with a normal sync so imported notes are verified
+and ready to consume. The flow is the one public entry point; the
+strategies are internal.
+
+```rust
+client.pull_account(account_id).await?;
+
+// `None` runs every strategy over the full chain and syncs afterwards.
+let report = client.recover_notes(None).await?;
+println!("recovered {} notes", report.imported);
+for problem in &report.problems {
+    println!("step {} did not run: {}", problem.step, problem.reason);
+}
+```
+
+Strategies are individually selectable and the backfill's block range can be
+bounded:
+
+```rust
+use miden_multisig_client::{NoteRecoveryOptions, PublicBackfillOptions};
+
+let report = client
+    .recover_notes(Some(NoteRecoveryOptions {
+        proposal_import: false,
+        backfill: PublicBackfillOptions {
+            from_block: Some(1_690_000u32.into()),
+            ..Default::default()
+        },
+        sync_after: false,
+        ..Default::default()
+    }))
+    .await?;
+```
+
+The combined `NoteRecoveryReport` carries each strategy's own report
+(`transport`, `proposal_import`, `backfill`) untouched; a strategy that
+cannot run at all (GUARDIAN unreachable, chain tip unresolvable, broken
+local store) becomes a `RecoveryStepProblem` entry instead of aborting the
+flow, and `retryable: true` means rerunning the flow — which is idempotent —
+can plausibly recover more. In brief:
+
+- **Transport drain** — rescans the full private-note transport backlog for
+  every tracked tag, regardless of the stored cursor (and without ever
+  regressing it). Bounded by the transport service's retention: a
+  best-effort rescan, **not** a backup.
+- **Proposal import** — rebuilds importable notes from the bytes v2
+  consume-notes proposals embed (validated against the proposals' declared
+  note ids) plus node-fetched inclusion proofs, so it works for private
+  notes too. Per-note `NoteImportOutcome`s; corrupt proposals and notes are
+  isolated as `Invalid` outcomes instead of blocking the rest.
+- **Public backfill** — tag-scoped historical scan (genesis to tip by
+  default) importing discovered public notes with their proofs, never
+  touching the global sync height; cost scales with matches, not range
+  length. Discoveries are screened with the execution-based `NoteScreener`
+  exactly like normal sync, and unscannable sub-ranges are reported in
+  `uncovered` instead of failing the flow.
+
+For the full report semantics see
+[`docs/MULTISIG_SDK.md`](../../docs/MULTISIG_SDK.md).
+
+### Preserving notes across a guardian switch
+
+Pending proposals do not survive a guardian switch — the new GUARDIAN is
+registered with bare account state — so the notes embedded in the old
+GUARDIAN's pending consume-notes proposals are the one recovery source
+`recover_notes` can no longer reach after the repoint. `execute_proposal`
+runs the proposal-import slice automatically on the switch-guardian path
+(against the old GUARDIAN, before the switch transaction executes),
+best-effort and bounded by a 30s timeout; the transport drain and public
+backfill deliberately do not run there (an intact local store loses
+nothing they rescan), and the offline switch flow skips the import
+entirely (it exists to avoid contacting the GUARDIAN). When repointing a
+client by hand — or before executing an offline switch while the old
+GUARDIAN is still reachable — request the same preservation first:
+
+```rust
+let report = client.preserve_pre_switch_proposal_notes().await;
+```
 
 ## Consume-notes metadata versions
 
@@ -300,15 +516,28 @@ is the `consume_notes_metadata_version` field on the wire.
   advanced past the block, store was wiped, private-note transport
   pruned the blob), verification fails with
   `MultisigError::LegacyConsumeNotesNoteMissing` and the cosigner
-  cannot sign. This is the failure tracked by
-  [issue #229](https://github.com/OpenZeppelin/guardian/issues/229).
+  cannot sign. This is the gap the v2 shape closes.
 - **v2 (self-contained)** — `consume_notes_metadata_version: 2` plus a
   `consume_notes_notes` array carrying base64-serialized `Note` bytes
   aligned by index with `note_ids`. Verification rebuilds the request
-  from the embedded notes alone — no local-store read, no network
-  call. This restores the same "rebuild from signed metadata" invariant
-  every other proposal type already satisfied (and that audit finding
-  **M-08** remediated for `p2id`).
+  from the embedded notes, never from whatever notes the verifier's
+  store happens to hold. This restores the same "rebuild from signed
+  metadata" invariant every other proposal type already satisfied (and
+  that audit finding **M-08** remediated for `p2id`).
+
+  The rebuild is not store-independent by itself, though: miden-client
+  consumes each input note as *authenticated* when the local store holds
+  its inclusion proof and as *unauthenticated* otherwise, and the two
+  commit differently into the signed summary (issue #409). Authenticated
+  is the canonical mode, so before every rebuild (list, sign, execute)
+  the verifier authenticates the embedded notes: notes already
+  authenticated locally are left alone, the rest get their inclusion
+  proofs from the Miden node in one round trip and are imported into
+  the local store as committed (with one sync if the store is behind the
+  note's block). Verification therefore reads and writes the local store
+  and contacts the node. Proposal creation does the same before the
+  summary and its chain anchor are captured, and refuses a note that is
+  not yet committed on chain.
 
 Proposal creation always emits v2 starting with this release; the
 proposer is the one party guaranteed to hold the notes locally. The
@@ -318,7 +547,7 @@ surfaces to the proposer before any signature collection begins.
 
 ### Error taxonomy
 
-All four errors below carry a stable, cross-SDK string code via
+All five errors below carry a stable, cross-SDK string code via
 `MultisigError::code()`. The TS SDK exposes the same identifiers as
 `Error.code`.
 
@@ -328,6 +557,7 @@ All four errors below carry a stable, cross-SDK string code via
 | `UnsupportedMetadataVersion { found }` | `consume_notes_unsupported_metadata_version` | Unrecognized version (including v1 on a cut-over build) |
 | `ConsumeNotesMetadataOversize { limit, actual }` | `consume_notes_metadata_oversize` | v2 metadata serialization exceeds 256 KiB at creation |
 | `LegacyConsumeNotesNoteMissing { note_id }` | `consume_notes_legacy_note_missing` | v1 path: local store does not contain the referenced note |
+| `ConsumeNoteNotAuthenticated { note_id, reason }` | `consume_notes_note_not_authenticated` | A note could not be authenticated: not committed on chain yet, the node served no proof, the import failed, or the store could not verify it after a sync |
 
 ### Cut-over policy
 
