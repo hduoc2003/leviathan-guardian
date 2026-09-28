@@ -40,7 +40,7 @@
     "test:browser": "playwright test --config playwright.config.ts"
   },
   "dependencies": {
-    "@miden-sdk/miden-sdk": "file:../../../leviathan-web-sdk/crates/web-client",
+    "@miden-sdk/miden-sdk": "0.17.0-rc.2-node.2712b14",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^2.0.1",
     "@openzeppelin/guardian-client": "file:../guardian-client"
