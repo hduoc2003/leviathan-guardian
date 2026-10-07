@@ -80,11 +80,11 @@ utoipa = { version = "5", features = ["axum_extras"] }
 # Miden 0.17 line: exact pins only. Must match the versions embedded in
 # the @miden-sdk/miden-sdk WASM build, or the two clients compute different
 # transaction summary commitments and auth procedure roots.
-miden-protocol = "=0.17.0-rc.6"
-miden-standards = "=0.17.0-rc.6"
-miden-tx = "=0.17.0-rc.6"
+miden-protocol = "=0.17.0-rc.7"
+miden-standards = "=0.17.0-rc.7"
+miden-tx = "=0.17.0-rc.7"
 miden-node-proto-build = { version = "=0.17.0-rc.2", default-features = false }
-miden-testing = "=0.17.0-rc.6"
+miden-testing = "=0.17.0-rc.7"
 miden-client = "=0.17.0-rc.2"
 miden-client-sqlite-store = "=0.17.0-rc.2"
 
@@ -124,19 +124,19 @@ miden-utils-sync           = { git = "https://git.softly.com/leviathan/miden-vm"
 miden-verifier             = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
 midenc-hir-type            = { git = "https://git.softly.com/leviathan/miden-vm", rev = "f45d60a094864df0c502a8fee4c00e748cb8e6e3" }
 
-miden-agglayer             = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-block-prover         = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-objects              = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-protobuf             = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-protobuf-derive      = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-protocol             = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-protocol-build-utils = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-standards            = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-testing              = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-tx                   = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
-miden-tx-batch             = { git = "https://git.softly.com/leviathan/protocol", rev = "9be8aeda547be0834b98fe9ad5008e36c28915b6" }
+miden-agglayer             = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-block-prover         = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-objects              = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-protobuf             = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-protobuf-derive      = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-protocol             = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-protocol-build-utils = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-standards            = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-testing              = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-tx                   = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
+miden-tx-batch             = { git = "https://git.softly.com/leviathan/protocol", rev = "1add29bb70b5fa43f9ef9722fa41ab7aac34a50a" }
 
 miden-node-proto-build = { git = "https://git.softly.com/leviathan/node", rev = "3687a33e99312c269ca869c5cbd07eadc3f462f0" }
 
-miden-client              = { git = "https://git.softly.com/leviathan/leviathan-client", rev = "96280774e1d99b4edf77fb73140085d94fcc69bc" }
-miden-client-sqlite-store = { git = "https://git.softly.com/leviathan/leviathan-client", rev = "96280774e1d99b4edf77fb73140085d94fcc69bc" }
+miden-client              = { git = "https://git.softly.com/leviathan/leviathan-client", rev = "6fbe6ddc9bfe45240417034b3a111c8dc233c3dd" }
+miden-client-sqlite-store = { git = "https://git.softly.com/leviathan/leviathan-client", rev = "6fbe6ddc9bfe45240417034b3a111c8dc233c3dd" }
