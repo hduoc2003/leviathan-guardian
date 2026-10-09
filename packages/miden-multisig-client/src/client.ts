@@ -230,8 +230,13 @@ export class MultisigClient {
    */
   async loadFromAccount(account: Account, signer: Signer): Promise<Multisig> {
     this._guardianClient.setSigner(signer);
+    const accountId = accountIdToHex(account);
+    const existingAccount = await this.midenClient.accounts.get(AccountId.fromHex(accountId));
+    if (!existingAccount) {
+      await this.midenClient.accounts.insert({ account, overwrite: true });
+    }
 
-    return this.buildMultisig(account, accountIdToHex(account), signer);
+    return this.buildMultisig(account, accountId, signer);
   }
 
   private async buildMultisig(

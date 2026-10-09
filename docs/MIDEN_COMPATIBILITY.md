@@ -20,7 +20,7 @@ elsewhere and link here:
 
 | Guardian | Miden protocol | `miden-protocol` / `miden-standards` | `miden-client` (Rust) | `@miden-sdk/miden-sdk` (npm) |
 |---|---|---|---|---|
-| 0.18.x | 0.17 | `=0.17.1` | `=0.17.2` | pending: Leviathan web SDK on protocol 0.17.1 |
+| 0.18.x | 0.17 | `=0.17.1` | `=0.17.2` | `0.17.2-node.5709efbb` (exact) |
 | 0.17.0 | 0.16 | `=0.16.1` | `=0.16.0` | `0.16.0` (exact) |
 | 0.16.x | 0.15 | `0.15.3` | `0.15.0` | `^0.15.8` |
 | 0.15.x | 0.15 | `0.15.x` | `0.15.0` | `^0.15.0` |
@@ -29,9 +29,8 @@ elsewhere and link here:
 | 0.12.x | 0.12 | n/a | `0.12.5` | `^0.12.5` |
 
 0.18.x builds on Miden 0.17. The Leviathan fork pins `miden-protocol` / `miden-standards`
-0.17.1 and `miden-client` 0.17.2 through its protocol and client forks. The npm SDK pin
-still embeds protocol 0.17.0-rc.7 until a Leviathan web SDK on 0.17.1 is published, so the
-TypeScript SDK does not yet match the Rust pins.
+0.17.1 and `miden-client` 0.17.2 through its protocol and client forks, and the npm SDK
+is the Leviathan web SDK built from the same cascade.
 
 0.17.0 builds on the stable Miden 0.16 release. `@miden-sdk/miden-sdk` 0.16.0 embeds
 `miden-client` 0.16.0 and `miden-protocol` / `miden-standards` 0.16.1, which is why the
@@ -224,8 +223,8 @@ Last checked 2026-10-05.
   and recovery are in
   [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md#account-data-wasnt-found-or-incomplete-storage-map-in-a-browser).
   When the web SDK fixes it: remove that guidance (`git grep useWorker`).
-- **Pins.** The workspace pins protocol 0.17.1 and client 0.17.2; the npm web SDK pin
-  still trails them (see the matrix). The protocol pin follows the client and web
+- **Pins.** The workspace pins protocol 0.17.1 and client 0.17.2, and the web SDK
+  built on them (see the matrix). The protocol pin follows the client and web
   SDK releases, not the protocol tags, because both SDKs must embed the same
   kernel.
 

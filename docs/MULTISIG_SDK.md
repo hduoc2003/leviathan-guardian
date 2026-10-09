@@ -754,9 +754,10 @@ cursor, and never regresses it. It is idempotent, and a failed drain
 restores the covered-tags bookkeeping so normal sync keeps working exactly
 as before the attempt.
 
-The TypeScript drain still follows the pre-0.17.1 client model of its pinned
-web SDK and has no skip counters; it moves to the paging drain described in
-the Rust section with the web SDK upgrade.
+The TypeScript drain still follows the pre-0.17.1 client model and has no skip
+counters. Its web SDK runs client 0.17.2, where clearing the covered-tags key no
+longer forces a rescan, so a drain reads only one sync's page budget per tag
+group. The SDK exposes no transport paging to port the Rust drain.
 
 Transport problems land in `report.transport`, never as exceptions:
 `unavailable` means no transport endpoint is configured or the transport
