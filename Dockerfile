@@ -20,10 +20,16 @@ RUN apt-get update && apt-get install -y \
 
 ARG CARGO_CHEF_VERSION=0.1.78
 ARG SCCACHE_VERSION=v0.17.0
-RUN cargo install --locked "cargo-chef@${CARGO_CHEF_VERSION}" \
- && curl -sSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      amd64) sccache_arch=x86_64 ;; \
+      arm64) sccache_arch=aarch64 ;; \
+      *) echo "unsupported TARGETARCH '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac \
+ && cargo install --locked "cargo-chef@${CARGO_CHEF_VERSION}" \
+ && curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${sccache_arch}-unknown-linux-musl.tar.gz" \
     | tar xz -C /tmp \
- && mv "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache \
+ && mv "/tmp/sccache-${SCCACHE_VERSION}-${sccache_arch}-unknown-linux-musl/sccache" /usr/local/bin/sccache \
  && chmod +x /usr/local/bin/sccache
 
 ENV RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache CARGO_INCREMENTAL=0

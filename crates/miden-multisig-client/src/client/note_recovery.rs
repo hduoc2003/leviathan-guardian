@@ -1,11 +1,10 @@
 //! Wallet-facing orchestration of the note-recovery primitives.
 //!
-//! After key-based recovery the local Miden store starts empty (or, in a
-//! shared store, its global cursors may already be past this account's
-//! notes). Each recovery primitive rescans one source normal forward sync
-//! would skip: the private-note transport backlog, the notes embedded in
-//! pending consume-notes proposals, and the chain's historical public notes
-//! for the account's tag. [`MultisigClient::recover_notes`] runs them as a
+//! After key-based recovery the local Miden store starts empty. Each recovery
+//! primitive reads one source normal forward sync would not reach: the
+//! private-note transport backlog, the notes embedded in pending
+//! consume-notes proposals, and the chain's historical public notes for the
+//! account's tag. [`MultisigClient::recover_notes`] runs them as a
 //! single flow and finishes with a normal sync so recovered notes are
 //! verified and ready to consume.
 
@@ -28,7 +27,7 @@ pub const PRE_SWITCH_IMPORT_TIMEOUT: Duration = Duration::from_secs(30);
 /// the method for exactly that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoteRecoveryOptions {
-    /// Rescan the private-note transport backlog
+    /// Drain the private-note transport backlog
     /// ([`MultisigClient::drain_private_note_backlog`]). Default `true`.
     pub transport_drain: bool,
     /// Import the notes embedded in pending consume-notes proposals
@@ -210,7 +209,7 @@ impl MultisigClient {
         };
 
         if options.transport_drain {
-            match self.drain_private_note_backlog().await {
+            match self.drain_private_note_backlog(account_id).await {
                 Ok(drain) => report.transport = Some(drain),
                 // The drain's contract: an `Err` means the local store
                 // itself failed, which a rerun is unlikely to fix.

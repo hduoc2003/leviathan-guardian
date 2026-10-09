@@ -16,6 +16,8 @@
 mod account;
 #[cfg(test)]
 mod anchor_binding_tests;
+#[cfg(test)]
+mod canonical_nonce_sync_tests;
 mod delta_history;
 #[cfg(test)]
 mod endpoint_scheme_tests;
@@ -49,6 +51,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use guardian_client::GetStateResponse;
+use miden_client::note_transport::NoteTransportClient;
 use miden_client::rpc::Endpoint;
 use miden_protocol::Word;
 use miden_protocol::account::AccountId;
@@ -125,8 +128,8 @@ pub struct MultisigClient {
     pub(crate) account_dir: PathBuf,
     /// Miden node endpoint (for recovery).
     pub(crate) miden_endpoint: Endpoint,
-    /// Note transport endpoint override (for recovery).
-    pub(crate) note_transport_endpoint: Option<String>,
+    /// The miden client's note transport; recovery pages it directly.
+    pub(crate) note_transport: Option<Arc<dyn NoteTransportClient>>,
     /// Node client for direct commitment reads, built once so its channel is
     /// reused across reads.
     node_rpc_client: Arc<dyn miden_client::rpc::NodeRpcClient>,
@@ -150,7 +153,7 @@ impl MultisigClient {
         guardian_endpoint: String,
         account_dir: PathBuf,
         miden_endpoint: Endpoint,
-        note_transport_endpoint: Option<String>,
+        note_transport: Option<Arc<dyn NoteTransportClient>>,
         prover_config: ProverConfig,
         rpc_config: RpcConfig,
     ) -> Self {
@@ -163,7 +166,7 @@ impl MultisigClient {
             account: None,
             account_dir,
             miden_endpoint,
-            note_transport_endpoint,
+            note_transport,
             node_rpc_client,
             prover_config,
             rpc_config,

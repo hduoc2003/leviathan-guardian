@@ -16,7 +16,6 @@ use miden_client::rpc::{Endpoint, GrpcClient, NodeRpcClient};
 use miden_client_sqlite_store::SqliteStore;
 use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SigningKey as EcdsaSecretKey;
 use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
-use miden_protocol::crypto::rand::RandomCoin;
 
 use crate::MidenSdkClient;
 use crate::client::MultisigClient;
@@ -85,9 +84,27 @@ fn resolved_note_transport_endpoint(
     }
 }
 
-fn configured_client_builder(
+/// Also kept by [`MultisigClient`] so recovery can page the transport itself.
+fn configured_note_transport(
     endpoint: &Endpoint,
     note_transport_endpoint: Option<&str>,
+    rpc_config: &RpcConfig,
+) -> Option<Arc<dyn NoteTransportClient>> {
+    let selection = rpc_config.resolve(DEFAULT_GRPC_TIMEOUT_MS);
+    let transport_endpoint =
+        resolved_note_transport_endpoint(endpoint, note_transport_endpoint, &selection)?;
+    let timeout_ms = match &selection {
+        RpcSelection::Passthrough => DEFAULT_GRPC_TIMEOUT_MS,
+        RpcSelection::Configured { timeout_ms, .. } => *timeout_ms,
+    };
+    let transport: Arc<dyn NoteTransportClient> =
+        Arc::new(GrpcNoteTransportClient::new(transport_endpoint, timeout_ms));
+    Some(configured_note_transport_client(transport, rpc_config))
+}
+
+fn configured_client_builder(
+    endpoint: &Endpoint,
+    note_transport: Option<Arc<dyn NoteTransportClient>>,
     prover_config: &ProverConfig,
     rpc_config: &RpcConfig,
 ) -> ClientBuilder<FilesystemKeyStore> {
@@ -103,20 +120,10 @@ fn configured_client_builder(
 
     let builder = base.rpc(configured_node_rpc_client(endpoint, rpc_config));
 
-    let selection = rpc_config.resolve(DEFAULT_GRPC_TIMEOUT_MS);
-    let builder =
-        match resolved_note_transport_endpoint(endpoint, note_transport_endpoint, &selection) {
-            Some(transport_endpoint) => {
-                let timeout_ms = match &selection {
-                    RpcSelection::Passthrough => DEFAULT_GRPC_TIMEOUT_MS,
-                    RpcSelection::Configured { timeout_ms, .. } => *timeout_ms,
-                };
-                let transport: Arc<dyn NoteTransportClient> =
-                    Arc::new(GrpcNoteTransportClient::new(transport_endpoint, timeout_ms));
-                builder.note_transport(configured_note_transport_client(transport, rpc_config))
-            }
-            None => builder,
-        };
+    let builder = match note_transport {
+        Some(transport) => builder.note_transport(transport),
+        None => builder,
+    };
 
     let default_remote = if endpoint == &Endpoint::devnet() {
         Some(DEVNET_PROVER_ENDPOINT)
@@ -297,10 +304,15 @@ impl MultisigClientBuilder {
             MultisigError::MidenClient(format!("failed to create account dir: {}", e))
         })?;
 
+        let note_transport = configured_note_transport(
+            &miden_endpoint,
+            note_transport_endpoint.as_deref(),
+            &self.rpc_config,
+        );
         let miden_client = create_miden_client(
             &account_dir,
             &miden_endpoint,
-            note_transport_endpoint.as_deref(),
+            note_transport.clone(),
             &self.prover_config,
             &self.rpc_config,
         )
@@ -312,7 +324,7 @@ impl MultisigClientBuilder {
             guardian_endpoint,
             account_dir,
             miden_endpoint,
-            note_transport_endpoint,
+            note_transport,
             self.prover_config,
             self.rpc_config,
         ))
@@ -326,7 +338,7 @@ impl MultisigClientBuilder {
 pub(crate) async fn create_miden_client(
     account_dir: &std::path::Path,
     endpoint: &Endpoint,
-    note_transport_endpoint: Option<&str>,
+    note_transport: Option<Arc<dyn NoteTransportClient>>,
     prover_config: &ProverConfig,
     rpc_config: &RpcConfig,
 ) -> Result<MidenSdkClient> {
@@ -344,12 +356,8 @@ pub(crate) async fn create_miden_client(
         .map_err(|e| MultisigError::MidenClient(format!("failed to open SQLite store: {}", e)))?;
     let store = Arc::new(store);
 
-    let rng_seed: [u32; 4] = rand::random();
-    let rng = Box::new(RandomCoin::new(rng_seed.into()));
-
-    configured_client_builder(endpoint, note_transport_endpoint, prover_config, rpc_config)
+    configured_client_builder(endpoint, note_transport, prover_config, rpc_config)
         .store(store)
-        .rng(rng)
         .tx_discard_delta(Some(20))
         .max_block_number_delta(256)
         .build()

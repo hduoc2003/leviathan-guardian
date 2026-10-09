@@ -4,6 +4,10 @@ export interface Signer {
   readonly commitment: string;
   readonly publicKey: string;
   readonly scheme: SignatureScheme;
+  /** Selects EIP-712 request authentication; absent keeps the raw signature path. */
+  readonly requestAuthFormat?: 'eip712';
+  /** Tags an ECDSA proposal approval as an EIP-712 transaction-summary signature. */
+  readonly proposalMessageFormat?: 'eip712';
   signAccountIdWithTimestamp(accountId: string, timestamp: number): Promise<string> | string;
   signRequest?(
     accountId: string,
@@ -14,8 +18,9 @@ export interface Signer {
 
   /**
    * Sign the lookup-bound digest for `/state/lookup`. The implementation
-   * MUST sign `LookupAuthMessage::to_word(timestamp_ms, key_commitment)` —
-   * domain-separated from `AuthRequestMessage`. The canonical implementation
+   * Raw signers sign `LookupAuthMessage::to_word(timestamp_ms, key_commitment)`;
+   * EIP-712 signers sign that hash as `GuardianLookup(bytes32 lookupHash)`.
+   * Both are domain-separated from `AuthRequestMessage`. The canonical implementation
    * lives in `@openzeppelin/miden-multisig-client/lookupAuth.ts`; this
    * zero-dependency package does not pull in the Miden SDK to compute it.
    *
@@ -37,6 +42,7 @@ export interface EcdsaSignature {
   scheme: 'ecdsa';
   signature: string;
   publicKey?: string;
+  messageFormat?: 'eip712';
 }
 
 export type ProposalSignature = FalconSignature | EcdsaSignature;
@@ -151,6 +157,20 @@ export interface StateObject {
   createdAt: string;
   updatedAt: string;
   authScheme?: string;
+}
+
+/**
+ * Head of the latest canonical state (`GET /state/nonce`): the account
+ * nonce carried by the state GUARDIAN holds as canonical and that state's
+ * commitment, without the state blob. A client can skip `getState` when
+ * `nonce` is below its local account nonce, or equal to it with the same
+ * `commitment`; an equal nonce at a different commitment means the local
+ * account diverged from GUARDIAN, so it fetches the state.
+ */
+export interface CanonicalNonce {
+  accountId: string;
+  nonce: number;
+  commitment: string;
 }
 
 export interface ConfigureRequest {

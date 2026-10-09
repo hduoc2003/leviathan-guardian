@@ -17,13 +17,13 @@ Miden multisig accounts store their authentication logic on-chain, but **their s
 ## Installation
 
 ```bash
-npm install @openzeppelin/miden-multisig-client @miden-sdk/miden-sdk@0.17.0-rc.2
+npm install @openzeppelin/miden-multisig-client@0.18.0 @miden-sdk/miden-sdk@0.17.0
 ```
 
-Miden 0.17 requires a new client database: a store created under 0.16 does
-not open. Pass a fresh `storeName` when creating the `MidenClient`, or delete
-the existing IndexedDB database first. Accounts and pending proposals from the
-0.16 line do not carry over; see the compatibility document below.
+Miden 0.17 requires a new client database: a store created under 0.16 does not
+open. Pass a fresh `storeName` when creating the `MidenClient`, or delete the
+existing IndexedDB database first. Accounts and pending proposals from the 0.16
+line do not carry over. See the compatibility document below.
 
 > **Why the peer version is exact**: the transaction-summary layout and the
 > guarded-multisig procedure roots are only byte-compatible between one
@@ -37,7 +37,7 @@ matches your Miden node:
 
 | This package | Miden protocol |
 |---|---|
-| 0.18.x | 0.17.x |
+| 0.18.x | 0.17.x (pre-release) |
 | 0.17.x | 0.16.x |
 | 0.16.x | 0.15.x |
 | 0.15.x | 0.15.x |
@@ -53,7 +53,7 @@ breaking changes per line, and what each upgrade does to stored data:
 import { MultisigClient, FalconSigner } from '@openzeppelin/miden-multisig-client';
 import { AuthSecretKey, MidenClient } from '@miden-sdk/miden-sdk';
 
-const midenClient = await MidenClient.createDevnet();
+const midenClient = await MidenClient.createDevnet({ useWorker: false });
 
 // Create a signer from your secret key
 const secretKey = AuthSecretKey.rpoFalconWithRNG(undefined);
@@ -74,6 +74,61 @@ const client = new MultisigClient(midenClient, {
   },
 });
 ```
+
+The SDK does all of its local work (account reads and writes, note imports and
+exports, chain syncs, proposal previews) through the `MidenClient` you pass in,
+and never opens a second client on that client's store. Pass the client your
+application executes transactions with: miden-client keeps account state in
+memory per client, so two live clients writing one store can leave either of
+them persisting a storage root computed from state it never saw.
+`midenRpcEndpoint` serves only the SDK's direct node reads (on-chain
+commitments and note inclusion proofs).
+
+In a browser, create that client with `useWorker: false`, which runs its WASM
+work on the page's main thread. In the default worker mode, transactions
+execute and apply in a Web Worker that never sees the account state this SDK
+writes with `accounts.insert`, so a device's local copy of the account breaks
+after `MultisigClient.load` or a `syncState()` import
+([0xMiden/web-sdk#441](https://github.com/0xMiden/web-sdk/issues/441)). The
+symptoms and recovery are in
+[TROUBLESHOOTING.md](https://github.com/OpenZeppelin/guardian/blob/main/docs/TROUBLESHOOTING.md#account-data-wasnt-found-or-incomplete-storage-map-in-a-browser).
+Node.js has no worker and is unaffected.
+
+For an ECDSA cosigner using an EIP-1193 wallet (including Ledger), call
+`Eip712Signer.connect(provider)` once to select the Ethereum address and
+recover its secp256k1 public key from a dedicated key-discovery signature.
+Alternatively, pass an already-enrolled public key and its matching address
+to `new Eip712Signer(provider, publicKeyHex, address)`. `LedgerSigner` remains
+an alias. Use the resulting signer with the same `client.load(accountId, signer)`,
+proposal-creation methods, and
+`multisig.signProposal(id)` flow as a raw signer. The Ledger user can create
+the proposal, then approve it. The approval and Guardian submission each
+require a separate `eth_signTypedData_v4` signature; authenticated reads in
+the flow also prompt the device. All signatures use the enrolled key; no
+separate Guardian signing endpoint is needed. The device displays hashes,
+not human-readable transferred assets. `recoverByKey` uses a separate
+`GuardianLookup(bytes32 lookupHash)` typed-data signature to discover accounts.
+EIP-712 execution requires an account compiled with the Miden 0.17 multisig
+authentication component; changing Guardian's signature format does not upgrade
+an older account's code root.
+
+For example, a Ledger-backed proposer follows the same proposal lifecycle as a
+raw signer:
+
+```typescript
+import { Eip712Signer } from '@openzeppelin/miden-multisig-client';
+
+const signer = await Eip712Signer.connect(provider); // key-discovery prompt
+const multisig = await client.load(accountId, signer); // authenticated reads may prompt
+const proposal = await multisig.createAddSignerProposal(newSignerCommitment); // request-auth prompt
+await multisig.signProposal(proposal.id); // EIP-712 approval and request-auth prompts
+await multisig.executeProposal(proposal.id); // authenticated calls may prompt again
+```
+
+The proposal ID is the transaction-summary commitment. The wallet signs an
+EIP-712 digest derived from that commitment, so the digest displayed by the
+wallet need not equal the proposal ID. The approval signature and the
+Guardian request-authentication signature are separate.
 
 The nested `prover` configuration is optional. Without it, the injected Miden
 client's prover is preserved. By default, cloneable remote provers get two total
@@ -109,6 +164,7 @@ explicitly.
 const midenClient = await MidenClient.create({
   rpcUrl: 'https://my-node.internal:57291',
   noteTransportUrl: 'https://my-transport.internal',
+  useWorker: false,
 });
 
 const client = new MultisigClient(midenClient, {
@@ -222,6 +278,28 @@ console.log('Commitment:', state.commitment);
 console.log('Created:', state.createdAt);
 ```
 
+### Sync Account State
+
+`syncState()` reconciles the local store with GUARDIAN. It first asks GUARDIAN
+for the nonce and commitment of its canonical state (`getCanonicalNonce`) and
+skips the full state fetch when that nonce is not above the local account's
+(at a matching commitment when equal). The result says which side stood:
+
+```typescript
+const synced = await multisig.syncState();
+if (synced.source === 'guardian') {
+  console.log('Imported GUARDIAN state at', synced.state.commitment);
+} else {
+  console.log(`Local nonce ${synced.localNonce} is current (GUARDIAN at ${synced.guardianNonce})`);
+}
+```
+
+Either way `multisig.account` and the cached config reflect the authoritative
+account afterwards. Call `fetchState()` when you need GUARDIAN's state copy
+regardless. The pre-check needs a GUARDIAN server that serves `GET /state/nonce`
+(issue #191); against an older server `syncState()` fails rather than falling back
+to the full fetch, so deploy the server first.
+
 ### Creating Proposals
 
 Every `create*Proposal` method takes its required arguments followed by a
@@ -246,7 +324,7 @@ The option shapes are exported as `CreateProposalOptions`,
 `CreateSignerProposalOptions`, and `CreateP2idProposalOptions`.
 
 All methods also accept `approvalExpirationDelta` (1 to 65535): the number of blocks after
-the proposal's anchor block by which the transaction must be included. Past
+the block the proposal binds by which the transaction must be included. Past
 that block the approvers' signatures no longer authorize it, the SDK refuses to
 execute it, and the node rejects it as expired. The summary binds the value, so
 the executing party cannot change it. Omitted, the approval never expires,
@@ -356,8 +434,7 @@ others; only the check itself writes `verified`, and a freshly parsed or
 imported proposal is `unchecked`. `retryable: true` means the
 re-execution hit a transient node error and the proposal may verify on
 the next sync; `retryable: false` means it cannot be reproduced (tampered
-metadata, or an anchor block the node has pruned) and has to be
-re-proposed. Verification is deliberately not part of `status`: a fully
+metadata, for example) and has to be re-proposed. Verification is deliberately not part of `status`: a fully
 signed proposal can be dead, so `'ready'` keeps meaning "threshold met"
 and `isProposalActionable(proposal)` answers "verified and ready".
 `signProposal` and `executeProposal` re-verify the one proposal they act
@@ -377,12 +454,23 @@ for (const p of await multisig.syncProposals()) {
 }
 ```
 
-Anchored re-execution needs the node to serve account state at the
-proposal's reference block, and nodes keep that history only briefly
-(devnet: about 50 blocks); once it is gone the proposal is reported as
-`failed` with `retryable: false` for everyone, the proposer included.
-Collect signatures and execute promptly, and re-propose once a proposal
-has aged out.
+Verification and execution run at the chain tip. Since Miden 0.17 a
+multisig summary binds the block its auth args name (the bound block), and
+every request the SDK builds declares that block (`withBlockNumbers`), so the
+summary reproduces at any later tip. An execution runs at the Miden client's
+sync height, so `syncProposals`, `signProposal`, `executeProposal`,
+`createTransactionProposalRequest` and the custom and offline paths sync the
+client first. Foreign accounts, the fee faucet among them, load at the tip, so
+a proposal stays verifiable however long it waits for signatures, even after
+the node has pruned the bound block's account state (devnet keeps about 50
+blocks). The proposal's `chainAnchor` still names the bound block, and
+0.18.0-rc.1 clients still re-execute at it.
+
+`createTransactionProposalRequest(proposalId)` returns the final, fully
+signed request for an integration that proves and submits with its own
+pipeline. Execute it at the chain tip, without an anchor, on a client that has
+synced recently: this call syncs first, and an execution loads the fee faucet
+at the client's sync height, which a node serves for only about 50 blocks.
 
 ### Execute a Proposal
 
@@ -475,7 +563,7 @@ import { buildP2idTransactionRequest, chainAnchorBlockNum } from '@openzeppelin/
 // The builder takes the Miden client because the executing account decides
 // the auth args the request has to carry (see below).
 const { request, salt } = await buildP2idTransactionRequest(
-  midenClient, senderId, recipientId, faucetId, amount, { midenRpcEndpoint },
+  midenClient, senderId, recipientId, faucetId, amount,
 );
 const proposal = await multisig.createCustomProposal(request.serialize(), 'b2agg');
 
@@ -488,12 +576,11 @@ const advice = await multisig.prepareCustomExecution(proposal.id, request.serial
 
 // The browser TransactionRequest is immutable, so rebuild from the same recipe
 // (inputs + salt + bound block) with the advice, then submit. `submitTransaction`
-// takes the proposal id to execute at the proposal's anchored reference block,
-// since the collected signatures only authorize the summary produced there.
+// executes at the chain tip: the rebuilt request declares the block it binds.
 const boundBlockNum = chainAnchorBlockNum(proposal.metadata.chainAnchor);
 const { request: finalRequest } = await buildP2idTransactionRequest(
   midenClient, senderId, recipientId, faucetId, amount,
-  { salt, boundBlockNum, signatureAdviceMap: advice, midenRpcEndpoint },
+  { salt, boundBlockNum, signatureAdviceMap: advice },
 );
 await multisig.submitTransaction(proposal.id, finalRequest);
 ```
@@ -502,8 +589,11 @@ Since Miden 0.17 a multisig auth procedure reads three words out of the
 transaction's auth arg: the block the summary binds together with the approval
 expiration, the salt, and the fee conversion info. The exported builders get
 them from `client.feeAwareTransactionRequestBuilder(account, { feeConversionSalt,
-boundBlockNum })`, which sets the commitment as the request's auth arg and puts
-the preimage in its advice map. An integration that assembles a request itself
+boundBlockNum })`, which sets the commitment as the request's auth arg, puts
+the preimage in its advice map, and declares the bound block with
+`withBlockNumbers` so the request executes at the chain tip. A request whose
+auth args bind a block it does not declare is refused with
+`BoundBlockNotDeclaredError`. An integration that assembles a request itself
 must start from that builder for a multisig account, and must not call
 `withFeeConversionSalt` or `withAuthArg` on it: the two setters clear each other
 and either one discards the auth args. The approval never expires unless the
@@ -564,8 +654,8 @@ if (recovered.length === 0) {
 ```
 
 The `Signer` passed to `recoverByKey` MUST implement `signLookupMessage`
-(the bundled `FalconSigner` and `EcdsaSigner` both do). The lookup endpoint
-authenticates by proof-of-possession of the queried commitment — same key
+(the bundled `FalconSigner`, `EcdsaSigner`, and `Eip712Signer` do). The lookup
+endpoint authenticates by proof-of-possession of the queried commitment - same key
 that already authenticates per-account requests, so revealing the account ID
 does not grant any new capability. See the design doc for the security
 analysis.

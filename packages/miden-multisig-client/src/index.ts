@@ -11,7 +11,7 @@
  * } from '@openzeppelin/miden-multisig-client';
  * import { MidenClient, AuthSecretKey } from '@miden-sdk/miden-sdk';
  *
- * const midenClient = await MidenClient.createDevnet();
+ * const midenClient = await MidenClient.createDevnet({ useWorker: false });
  * const secretKey = AuthSecretKey.rpoFalconWithRNG(undefined);
  *
  * // Store in miden-sdk's keystore
@@ -59,17 +59,20 @@ export { lookupAuthDigest } from './lookupAuth.js';
 export {
   Multisig,
   type AccountState,
+  type SyncStateResult,
   type CreateProposalOptions,
   type CreateSignerProposalOptions,
   type CreateP2idProposalOptions,
 } from './multisig.js';
 export { AccountInspector, type DetectedMultisigConfig, type VaultBalance } from './inspector.js';
 export {
+  ChainBehindBoundBlockError,
   chainAnchorFromBase64,
   chainAnchorToBase64,
   chainAnchorBlockNum,
   executeForSummary,
   executeForSummaryAt,
+  executeForSummaryAtTip,
   summaryApprovalExpirationBlockNum,
   summarySalt,
   SummaryAnchorMismatchError,
@@ -93,8 +96,6 @@ export {
 // hex, directly comparable to `ExportedProposal.commitment` / `Proposal.id`.
 export { computeCommitmentFromTxSummary } from './multisig/helpers.js';
 export type {
-  MidenClientMultisigRequestOptions,
-  MidenClientSignatureOptions,
   MultisigRequestOptions,
   SignatureOptions,
 } from './transaction/options.js';
@@ -146,9 +147,12 @@ export type {
 export {
   FalconSigner,
   EcdsaSigner,
+  Eip712Signer,
+  LedgerSigner,
   ParaSigner,
   MidenWalletSigner,
   type ParaSigningContext,
+  type Eip1193SignerProvider,
   type WalletSigningContext,
 } from './signer.js';
 export { PublicKeyFormat } from './utils/key.js';
@@ -192,6 +196,7 @@ export {
 
 export {
   type AuthArgErrorCode,
+  BoundBlockNotDeclaredError,
   MultisigAuthArgsMissingError,
   ProposalSaltMalformedError,
 } from './multisig/authArgErrors.js';

@@ -21,6 +21,7 @@ mod dashboard_info;
 mod dashboard_pagination;
 mod dashboard_stats;
 mod delta_commit;
+mod get_canonical_nonce;
 mod get_delta;
 mod get_delta_history;
 mod get_delta_proposal;
@@ -78,6 +79,9 @@ pub use dashboard_stats::{
     DashboardStatsRefreshResponse, DashboardStatsRefreshStatus, DashboardStatsResponse,
     get_dashboard_stats, parse_updated_since, request_dashboard_stats_refresh,
 };
+pub use get_canonical_nonce::{
+    CanonicalNonceResponse, GetCanonicalNonceParams, get_canonical_nonce,
+};
 pub use get_delta::{GetDeltaParams, GetDeltaResult, get_delta};
 pub use get_delta_history::{
     GetDeltaHistoryParams, HistoryEntry, HistoryEntryStatus, get_delta_history,
@@ -102,6 +106,8 @@ pub use status::{StatusResponse, build_status};
 pub struct ResolvedAccount {
     pub metadata: AccountMetadata,
     pub storage: Arc<dyn StorageBackend>,
+    /// Identity verified by the request authenticator.
+    pub signer_commitment: String,
 }
 
 impl std::fmt::Debug for ResolvedAccount {
@@ -161,7 +167,11 @@ pub async fn resolve_account(
 
     let storage = state.storage.clone();
 
-    Ok(ResolvedAccount { metadata, storage })
+    Ok(ResolvedAccount {
+        metadata,
+        storage,
+        signer_commitment,
+    })
 }
 
 pub(crate) fn validate_request_timestamp(
@@ -459,6 +469,7 @@ mod tests {
             network_client: Arc::new(network),
             ack,
             canonicalization: None,
+            release_sweep: None,
             clock: Arc::new(clock),
             dashboard: Arc::new(crate::dashboard::DashboardState::default()),
             auditor: Arc::new(crate::audit::LogAuditor::new()),

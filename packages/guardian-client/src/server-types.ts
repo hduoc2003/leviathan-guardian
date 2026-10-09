@@ -7,6 +7,7 @@ export interface ServerEcdsaSignature {
   scheme: 'ecdsa';
   signature: string;
   public_key?: string;
+  message_format?: 'eip712';
 }
 
 export type ServerProposalSignature = ServerFalconSignature | ServerEcdsaSignature;
@@ -108,6 +109,12 @@ export interface ServerStateObject {
   created_at: string;
   updated_at: string;
   auth_scheme?: string;
+}
+
+export interface ServerCanonicalNonceResponse {
+  account_id: string;
+  nonce: number;
+  commitment: string;
 }
 
 export type ServerAuthConfig =

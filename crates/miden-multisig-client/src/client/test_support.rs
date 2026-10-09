@@ -78,8 +78,8 @@ pub(crate) async fn offline_client_parts_with_keystore(
         .store(store.clone())
         .filesystem_keystore(keystore_dir)
         .expect("keystore opens");
-    if let Some(transport) = transport {
-        builder = builder.note_transport(transport);
+    if let Some(transport) = &transport {
+        builder = builder.note_transport(transport.clone());
     }
     let miden_client = builder.build().await.expect("miden client builds");
     miden_client
@@ -93,7 +93,7 @@ pub(crate) async fn offline_client_parts_with_keystore(
         "http://localhost:1".to_string(),
         dir.to_path_buf(),
         Endpoint::localhost(),
-        None,
+        transport,
         ProverConfig::new(),
         RpcConfig::new(),
     );

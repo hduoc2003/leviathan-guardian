@@ -69,6 +69,25 @@ console.log('Commitment:', state.commitment);
 console.log('State data:', state.state_json.data);
 ```
 
+### Get Canonical Nonce
+
+Nonce and commitment of the latest canonical state, without the state blob
+(`GET /state/nonce`). The full `getState` fetch can be skipped when Guardian's
+nonce is below the local account's nonce, or equal to it with the same
+commitment. An equal nonce at a different commitment means the local account
+has diverged from Guardian, so fetch the state in that case too. The multisig
+SDK's `syncState()` runs this pre-check for you.
+
+```typescript
+const head = await client.getCanonicalNonce(accountId);
+const inSync =
+  head.nonce < localNonce ||
+  (head.nonce === localNonce && head.commitment === localCommitment);
+if (!inSync) {
+  const state = await client.getState(accountId);
+}
+```
+
 ### Abandon a Stuck Candidate
 
 If an approved transaction died client-side after guardian approval, its
@@ -107,9 +126,10 @@ directly. The Guardian server exposes `GET /state/lookup` so the wallet
 can ask "which account(s) authorize this commitment?" and proceed with
 the existing recovery flow.
 
-The signer used here MUST implement `signLookupMessage`, which signs the
+The signer used here MUST implement `signLookupMessage`. Raw signers sign the
 domain-separated `LookupAuthMessage::to_word(timestampMs, keyCommitment)`
-digest. The canonical implementation lives in
+digest; EIP-712 signers sign that hash as `GuardianLookup(bytes32 lookupHash)`
+and set `requestAuthFormat` to `eip712`. The canonical hash implementation lives in
 `@openzeppelin/miden-multisig-client` (which has access to the Miden SDK's
 RPO256); this package keeps the digest computation out of its zero-dependency
 surface.
