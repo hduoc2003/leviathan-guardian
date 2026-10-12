@@ -16,7 +16,7 @@ services:
       # How the container reaches the dstack guest agent that derives the
       # storage encryption key. Without it the server refuses to boot.
       - /var/run/dstack.sock:/var/run/dstack.sock
-      - guardian-keystore:/var/guardian/keystore
+      - guardian-keystore-l0172:/var/guardian/keystore
     environment:
       GUARDIAN_ENV: prod
       GUARDIAN_NETWORK_TYPE: MidenTestnet
@@ -49,7 +49,7 @@ services:
     # No `ports`: dstack turns every published port into a public endpoint, and
     # nothing outside this compose needs to reach the database.
     volumes:
-      - guardian-postgres:/var/lib/postgresql/data
+      - guardian-postgres-l0172:/var/lib/postgresql/data
     environment:
       POSTGRES_USER: guardian
       POSTGRES_DB: guardian
@@ -61,5 +61,5 @@ services:
       retries: 5
 
 volumes:
-  guardian-postgres:
-  guardian-keystore:
+  guardian-postgres-l0172:
+  guardian-keystore-l0172:
