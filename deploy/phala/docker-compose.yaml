@@ -24,7 +24,7 @@ services:
       GUARDIAN_STORAGE_ENCRYPTION_DSTACK_PATH: guardian/storage
       # The network type alone resolves to Miden's own testnet, so the Leviathan
       # node has to be pinned here.
-      GUARDIAN_MIDEN_RPC_ENDPOINT: http://178.63.134.75:57291
+      GUARDIAN_MIDEN_RPC_ENDPOINT: https://leviathandev.neptune.io
       # An ephemeral ack key would change the on-chain ack-key commitment on
       # every restart and freeze accounts that pinned the previous one, so the
       # keys are minted once onto the encrypted volume above and read back after.
