@@ -7,7 +7,7 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/deploy-phala.sh <registry/repo:tag> --repo <owner/name> \
-#     [--cvm-id <id>] [--dry-run]
+#     [--cvm-id <id>] [--env-file <path>] [--dry-run]
 #
 # The image is built by .github/workflows/docker-publish.yml, never here.
 #
@@ -22,17 +22,19 @@ COMPOSE="$REPO_ROOT/deploy/phala/docker-compose.yaml"
 IMAGE=""
 GH_REPO=""
 CVM_ID=""
+ENV_FILE="${GUARDIAN_PHALA_ENV_FILE:-$HOME/code/softly/leviathan-vps-secrets/guardian-phala.env}"
 DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) GH_REPO="$2"; shift 2 ;;
     --cvm-id) CVM_ID="$2"; shift 2 ;;
+    --env-file) ENV_FILE="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) IMAGE="$1"; shift ;;
   esac
 done
-[ -n "$IMAGE" ] && [ -n "$GH_REPO" ] || { echo "usage: $0 <registry/repo:tag> --repo <owner/name> [--cvm-id <id>] [--dry-run]" >&2; exit 2; }
+[ -n "$IMAGE" ] && [ -n "$GH_REPO" ] || { echo "usage: $0 <registry/repo:tag> --repo <owner/name> [--cvm-id <id>] [--env-file <path>] [--dry-run]" >&2; exit 2; }
 case "${IMAGE##*/}" in
   *:*) ;;
   *) echo "expected <registry/repo:tag>, got '$IMAGE'" >&2; exit 2 ;;
@@ -83,8 +85,13 @@ fi
 
 [ -n "$CVM_ID" ] || { echo "--cvm-id is required to deploy (omit it with --dry-run)" >&2; exit 2; }
 
+# Postgres applies the password only at initdb; a new value would lock guardian out.
+[ -r "$ENV_FILE" ] || { echo "env file $ENV_FILE is missing or unreadable" >&2; exit 1; }
+grep -qE '^POSTGRES_PASSWORD=[A-Za-z0-9]+$' "$ENV_FILE" \
+  || { echo "$ENV_FILE has no URL-safe POSTGRES_PASSWORD=<alphanumeric> line" >&2; exit 1; }
+
 echo ">> Deploying to CVM $CVM_ID"
-phala deploy --cvm-id "$CVM_ID" --compose "$COMPOSE" --wait
+phala deploy --cvm-id "$CVM_ID" --compose "$COMPOSE" -e "$ENV_FILE" --wait
 
 echo
 echo ">> Deployed. If this app uses Onchain KMS, the new compose_hash must be"

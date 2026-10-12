@@ -39,7 +39,7 @@ Supplied through encrypted env:
 
 | Variable | Notes |
 |---|---|
-| `POSTGRES_PASSWORD` | the only required one; read by both services, and the database is never reachable from outside. It is spliced into `DATABASE_URL`, so keep it URL-safe (`openssl rand -hex 32`). Postgres applies it at initdb only: once the volume exists, changing it here just breaks guardian's login, and rotating for real needs an `ALTER ROLE` inside the CVM |
+| `POSTGRES_PASSWORD` | the only required one; read by both services, and the database is never reachable from outside. It is fixed, not generated: `deploy-phala.sh` reads it from the env file (`--env-file`, default `$GUARDIAN_PHALA_ENV_FILE` or `~/code/softly/leviathan-vps-secrets/guardian-phala.env`, mode 600) and refuses to deploy without a `POSTGRES_PASSWORD=<alphanumeric>` line, since it is spliced into `DATABASE_URL`. Postgres applies it at initdb only: once the volume exists, changing it here just breaks guardian's login, and rotating for real needs an `ALTER ROLE` inside the CVM |
 | `GUARDIAN_DASHBOARD_CURSOR_SECRET` | optional; needed once there is more than one replica, so dashboard cursors validate across them. A missing one only warns and boots with a per-process random secret |
 
 Two things are deliberately unset, and both have consequences worth choosing
@@ -116,7 +116,7 @@ Then:
 
 ```bash
 ./scripts/deploy-phala.sh ghcr.io/<owner>/guardian:<tag> \
-  --repo <owner>/<repo> --cvm-id <id>
+  --repo <owner>/<repo> --cvm-id <id> [--env-file <path>]
 ```
 
 `--repo` is the GitHub repository the attestation must name. It is required
@@ -125,7 +125,9 @@ rather than derived from the registry path, which is not always the same name.
 It resolves the tag to a content digest, checks the digest's attestation with
 `gh attestation verify`, writes the digest into the compose file, and refuses to
 deploy while the placeholder digest is still there. Add `--dry-run` to stop
-after pinning. Do not hand-edit the digest.
+after pinning. Do not hand-edit the digest. The deploy passes the env file to
+`phala deploy -e`, which replaces the whole encrypted env, so the file must hold
+every encrypted variable the CVM uses.
 
 Verifying independently:
 
