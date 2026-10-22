@@ -129,6 +129,14 @@ after pinning. Do not hand-edit the digest. The deploy passes the env file to
 `phala deploy -e`, which replaces the whole encrypted env, so the file must hold
 every encrypted variable the CVM uses.
 
+After a chain reset, add `--reset-db`. Once deployed, it stops guardian,
+truncates the chain-bound tables (accounts, states, deltas, proposals, auth
+state, sessions, audit rows, stats snapshots, worker leases), restarts it, and
+fails unless `/status` is ok and `/pubkey` is unchanged. The keystore volume (ACK
+keys), the migrations and `storage_encryption_marker` stay. It runs over
+`phala ssh`, so it works only on the dev OS image: on the Production OS image the
+script refuses before deploying.
+
 Verifying independently:
 
 ```bash

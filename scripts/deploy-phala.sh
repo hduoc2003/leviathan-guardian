@@ -7,7 +7,7 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/deploy-phala.sh <registry/repo:tag> --repo <owner/name> \
-#     [--cvm-id <id>] [--env-file <path>] [--dry-run]
+#     [--cvm-id <id>] [--env-file <path>] [--reset-db] [--dry-run]
 #
 # The image is built by .github/workflows/docker-publish.yml, never here.
 #
@@ -24,17 +24,20 @@ GH_REPO=""
 CVM_ID=""
 ENV_FILE="${GUARDIAN_PHALA_ENV_FILE:-$HOME/code/softly/leviathan-vps-secrets/guardian-phala.env}"
 DRY_RUN=0
+RESET_DB=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) GH_REPO="$2"; shift 2 ;;
     --cvm-id) CVM_ID="$2"; shift 2 ;;
     --env-file) ENV_FILE="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --reset-db) RESET_DB=1; shift ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) IMAGE="$1"; shift ;;
   esac
 done
-[ -n "$IMAGE" ] && [ -n "$GH_REPO" ] || { echo "usage: $0 <registry/repo:tag> --repo <owner/name> [--cvm-id <id>] [--env-file <path>] [--dry-run]" >&2; exit 2; }
+[ -n "$IMAGE" ] && [ -n "$GH_REPO" ] || { echo "usage: $0 <registry/repo:tag> --repo <owner/name> [--cvm-id <id>] [--env-file <path>] [--reset-db] [--dry-run]" >&2; exit 2; }
+[ "$RESET_DB" -eq 0 ] || [ "$DRY_RUN" -eq 0 ] || { echo "--reset-db needs a deploy; drop --dry-run" >&2; exit 2; }
 case "${IMAGE##*/}" in
   *:*) ;;
   *) echo "expected <registry/repo:tag>, got '$IMAGE'" >&2; exit 2 ;;
@@ -90,8 +93,36 @@ fi
 grep -qE '^POSTGRES_PASSWORD=[A-Za-z0-9]+$' "$ENV_FILE" \
   || { echo "$ENV_FILE has no URL-safe POSTGRES_PASSWORD=<alphanumeric> line" >&2; exit 1; }
 
+# Probed before deploying so a CVM without a shell fails before anything changes.
+if [ "$RESET_DB" -eq 1 ]; then
+  phala ssh "$CVM_ID" -- true \
+    || { echo "--reset-db needs phala ssh into CVM $CVM_ID, which only the dev OS image allows (not the Production OS image)" >&2; exit 1; }
+fi
+
 echo ">> Deploying to CVM $CVM_ID"
 phala deploy --cvm-id "$CVM_ID" --compose "$COMPOSE" -e "$ENV_FILE" --wait
+
+# Keeps the keystore volume (ACK keys), migrations and the dstack-bound storage_encryption_marker.
+if [ "$RESET_DB" -eq 1 ]; then
+  echo ">> Resetting guardian chain state on CVM $CVM_ID"
+  phala ssh "$CVM_ID" -- '
+    set -e
+    G=$(docker ps -q --filter label=com.docker.compose.service=guardian)
+    P=$(docker ps -q --filter label=com.docker.compose.service=postgres)
+    [ -n "$G" ] && [ -n "$P" ] || { echo "guardian or postgres container not running" >&2; exit 1; }
+    healthy() { for i in $(seq 1 30); do wget -qO- http://127.0.0.1:3000/status 2>/dev/null | grep -q "\"status\":\"ok\"" && return 0; sleep 2; done; return 1; }
+    healthy || { echo "guardian not healthy before the reset" >&2; exit 1; }
+    before=$(wget -qO- http://127.0.0.1:3000/pubkey)
+    trap "docker start $G >/dev/null" EXIT
+    docker stop "$G" >/dev/null
+    docker exec "$P" psql -U guardian -d guardian -v ON_ERROR_STOP=1 -c "BEGIN; TRUNCATE account_auth_state, account_metadata, admin_actions, auth_challenges, auth_sessions, dashboard_stats_snapshots, delta_proposals, deltas, states, worker_leases RESTART IDENTITY CASCADE; COMMIT;"
+    docker start "$G" >/dev/null
+    healthy || { echo "guardian not healthy after the reset" >&2; exit 1; }
+    after=$(wget -qO- http://127.0.0.1:3000/pubkey)
+    [ "$before" = "$after" ] || { echo "ACK key changed across the reset: $before -> $after" >&2; exit 1; }
+    echo "reset done; ACK key unchanged: $after"
+  ' || { echo "chain-state reset FAILED on CVM $CVM_ID" >&2; exit 1; }
+fi
 
 echo
 echo ">> Deployed. If this app uses Onchain KMS, the new compose_hash must be"
