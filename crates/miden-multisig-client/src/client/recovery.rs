@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use miden_client::note::{NoteFile, NoteScreenerError, NoteSyncHint};
 use miden_client::note_transport::{
-    NoteInfo, NoteTransportClient, NoteTransportCursor, NoteTransportError,
+    NoteInfo, NoteTransportClient, NoteTransportCursor, NoteTransportError, NoteTransportPage,
 };
 use miden_client::store::NoteFilter;
 use miden_client::sync::NoteTagSource;
@@ -229,15 +229,17 @@ impl MultisigClient {
         tags: &[NoteTag],
         skipped: &mut Skipped,
     ) -> std::result::Result<(), DrainStop> {
-        let mut cursor = NoteTransportCursor::init();
+        let mut cursor = None;
+        let mut sync_to = None;
         for _ in 0..MAX_PAGES_PER_TAG_GROUP {
             let page = transport
-                .fetch_notes_page(tags, cursor)
+                .fetch_notes_page(tags, cursor, sync_to)
                 .await
                 .map_err(ClientError::from)?;
-            if !made_progress(cursor, page.cursor, page.notes.is_empty(), page.has_more) {
+            if !made_progress(cursor, sync_to, &page) {
                 return Err(DrainStop::InvalidPage);
             }
+            sync_to.get_or_insert(page.sync_to);
             let notes = page
                 .notes
                 .iter()
@@ -253,7 +255,7 @@ impl MultisigClient {
             if !page.has_more {
                 return Ok(());
             }
-            cursor = page.cursor;
+            cursor = Some(page.cursor);
         }
         Err(DrainStop::PageLimit)
     }
@@ -338,25 +340,25 @@ impl MultisigClient {
     }
 }
 
-/// Mirrors miden-client's page validation: a page with notes must advance the cursor.
+/// Mirrors miden-client's `validate_transport_page`.
 fn made_progress(
-    request: NoteTransportCursor,
-    page: NoteTransportCursor,
-    page_is_empty: bool,
-    has_more: bool,
+    request_cursor: Option<NoteTransportCursor>,
+    request_sync_to: Option<NoteTransportCursor>,
+    page: &NoteTransportPage,
 ) -> bool {
-    let Some((nonce, sequence)) = page.parts() else {
-        return false;
-    };
-    if has_more && page_is_empty || (!page_is_empty && sequence == 0) {
+    let NoteTransportCursor { nonce, sequence } = page.cursor;
+    if request_sync_to.is_some_and(|bound| bound != page.sync_to)
+        || nonce != page.sync_to.nonce
+        || sequence > page.sync_to.sequence
+    {
         return false;
     }
-    match request.parts() {
-        Some((request_nonce, request_sequence)) if request_nonce == nonce => {
-            sequence > request_sequence || (page_is_empty && sequence == request_sequence)
-        }
-        _ => true,
-    }
+    !(request_cursor.is_some_and(|request| {
+        nonce == request.nonce
+            && (sequence < request.sequence
+                || (!page.notes.is_empty() && sequence == request.sequence))
+    }) || (!page.notes.is_empty() && sequence == 0)
+        || (page.has_more && page.notes.is_empty()))
 }
 
 /// Rebuilds a transport note like miden-client, or `None` when malformed or of an
@@ -713,17 +715,12 @@ mod tests {
             Ok(())
         }
 
-        async fn fetch_notes(
+        async fn fetch_notes_page(
             &self,
             tags: &[NoteTag],
-            cursor: miden_client::note_transport::NoteTransportCursor,
-        ) -> std::result::Result<
-            (
-                Vec<miden_client::note_transport::NoteInfo>,
-                miden_client::note_transport::NoteTransportCursor,
-            ),
-            NoteTransportError,
-        > {
+            cursor: Option<NoteTransportCursor>,
+            sync_to: Option<NoteTransportCursor>,
+        ) -> std::result::Result<NoteTransportPage, NoteTransportError> {
             let allowed = self
                 .fetches_before_failure
                 .fetch_update(
@@ -737,7 +734,7 @@ mod tests {
                     "connection dropped mid-drain".to_string(),
                 ));
             }
-            Ok(self.inner.fetch_notes(tags, cursor))
+            self.inner.fetch_notes_page(tags, cursor, sync_to).await
         }
     }
 
@@ -793,31 +790,15 @@ mod tests {
             Ok(())
         }
 
-        async fn fetch_notes(
-            &self,
-            tags: &[NoteTag],
-            cursor: NoteTransportCursor,
-        ) -> std::result::Result<
-            (
-                Vec<miden_client::note_transport::NoteInfo>,
-                NoteTransportCursor,
-            ),
-            NoteTransportError,
-        > {
-            self.requests
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(self.inner.fetch_notes(tags, cursor))
-        }
-
         async fn fetch_notes_page(
             &self,
             tags: &[NoteTag],
-            cursor: NoteTransportCursor,
-        ) -> std::result::Result<miden_client::note_transport::NoteTransportPage, NoteTransportError>
-        {
+            cursor: Option<NoteTransportCursor>,
+            sync_to: Option<NoteTransportCursor>,
+        ) -> std::result::Result<NoteTransportPage, NoteTransportError> {
             self.requests
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.fetch_notes_page(tags, cursor).await
+            self.inner.fetch_notes_page(tags, cursor, sync_to).await
         }
     }
 
@@ -856,21 +837,56 @@ mod tests {
 
     #[test]
     fn made_progress_accepts_forward_pages_and_rejects_stalls() {
-        let at = |seq| NoteTransportCursor::from_parts(1, seq);
-        let start = NoteTransportCursor::init();
-        assert!(made_progress(start, at(3), false, true));
-        assert!(made_progress(at(3), at(3), true, false));
-        assert!(!made_progress(start, start, true, false));
-        assert!(!made_progress(at(3), at(4), true, true));
-        assert!(!made_progress(at(3), at(3), false, true));
-        assert!(!made_progress(at(3), at(2), true, false));
-        assert!(!made_progress(start, at(0), false, false));
-        // Another transport database restarts the sequence.
+        let at = |sequence| NoteTransportCursor { nonce: 1, sequence };
+        let note = private_note_for(&test_wallet(1), 1);
+        let info = NoteInfo::new(*note.header(), NoteDetails::from(note).to_bytes());
+        let page = |cursor, sync_to, with_note: bool, has_more| NoteTransportPage {
+            notes: if with_note {
+                vec![info.clone()]
+            } else {
+                Vec::new()
+            },
+            cursor,
+            has_more,
+            sync_to,
+        };
+        assert!(made_progress(None, None, &page(at(3), at(5), true, true)));
         assert!(made_progress(
-            at(9),
-            NoteTransportCursor::from_parts(2, 1),
-            false,
-            false
+            Some(at(3)),
+            Some(at(5)),
+            &page(at(3), at(5), false, false)
+        ));
+        assert!(!made_progress(
+            Some(at(3)),
+            Some(at(5)),
+            &page(at(4), at(5), false, true)
+        ));
+        assert!(!made_progress(
+            Some(at(3)),
+            Some(at(5)),
+            &page(at(3), at(5), true, true)
+        ));
+        assert!(!made_progress(
+            Some(at(3)),
+            Some(at(5)),
+            &page(at(2), at(5), false, false)
+        ));
+        assert!(!made_progress(None, None, &page(at(0), at(5), true, false)));
+        assert!(!made_progress(
+            Some(at(3)),
+            Some(at(5)),
+            &page(at(4), at(6), true, false)
+        ));
+        assert!(!made_progress(None, None, &page(at(7), at(5), true, false)));
+        // Another transport database restarts the sequence.
+        let other = NoteTransportCursor {
+            nonce: 2,
+            sequence: 1,
+        };
+        assert!(made_progress(
+            Some(at(9)),
+            None,
+            &page(other, other, true, false)
         ));
     }
 

@@ -8,8 +8,7 @@ use guardian_shared::retry::{
     connect_failure_is_permanent, is_transient_error_with, run_retries,
 };
 use miden_client::note_transport::{
-    NoteInfo, NoteTransportClient, NoteTransportCursor, NoteTransportError, NoteTransportPage,
-    TransportNote,
+    NoteTransportClient, NoteTransportCursor, NoteTransportError, NoteTransportPage, TransportNote,
 };
 use miden_client::rpc::domain::account::{AccountProof, GetAccountRequest};
 use miden_client::rpc::domain::account_vault::AccountVaultInfo;
@@ -306,6 +305,14 @@ impl NodeRpcClient for RetryingNodeRpcClient {
             .await
     }
 
+    async fn is_invitation_code_valid(
+        &self,
+        invitation_code: &str,
+    ) -> std::result::Result<bool, RpcError> {
+        self.execute(|| self.inner.is_invitation_code_valid(invitation_code))
+            .await
+    }
+
     async fn get_block_header_by_number(
         &self,
         block_num: Option<BlockNumber>,
@@ -365,10 +372,9 @@ impl NodeRpcClient for RetryingNodeRpcClient {
 
     async fn get_account(
         &self,
-        account_id: AccountId,
         request: GetAccountRequest,
     ) -> std::result::Result<(BlockNumber, AccountProof), RpcError> {
-        self.execute(|| self.inner.get_account(account_id, request.clone()))
+        self.execute(|| self.inner.get_account(request.clone()))
             .await
     }
 
@@ -520,22 +526,13 @@ impl NoteTransportClient for RetryingNoteTransportClient {
         self.inner.send_note_with_proof(note, inclusion_proof).await
     }
 
-    async fn fetch_notes(
-        &self,
-        tag: &[NoteTag],
-        cursor: NoteTransportCursor,
-    ) -> std::result::Result<(Vec<NoteInfo>, NoteTransportCursor), NoteTransportError> {
-        self.retry_fetch(|| self.inner.fetch_notes(tag, cursor))
-            .await
-    }
-
-    /// Forwarded so the inner transport's `has_more` survives the wrapper.
     async fn fetch_notes_page(
         &self,
         tags: &[NoteTag],
-        cursor: NoteTransportCursor,
+        cursor: Option<NoteTransportCursor>,
+        sync_to: Option<NoteTransportCursor>,
     ) -> std::result::Result<NoteTransportPage, NoteTransportError> {
-        self.retry_fetch(|| self.inner.fetch_notes_page(tags, cursor))
+        self.retry_fetch(|| self.inner.fetch_notes_page(tags, cursor, sync_to))
             .await
     }
 }
@@ -775,6 +772,9 @@ mod tests {
         async fn is_account_allowed(&self, _: AccountId) -> std::result::Result<bool, RpcError> {
             unimplemented!()
         }
+        async fn is_invitation_code_valid(&self, _: &str) -> std::result::Result<bool, RpcError> {
+            unimplemented!()
+        }
         async fn get_block_header_by_number(
             &self,
             _: Option<BlockNumber>,
@@ -820,7 +820,6 @@ mod tests {
         }
         async fn get_account(
             &self,
-            _: AccountId,
             _: GetAccountRequest,
         ) -> std::result::Result<(BlockNumber, AccountProof), RpcError> {
             unimplemented!()
@@ -1029,11 +1028,12 @@ mod tests {
             Err((self.error)())
         }
 
-        async fn fetch_notes(
+        async fn fetch_notes_page(
             &self,
             _: &[NoteTag],
-            cursor: NoteTransportCursor,
-        ) -> std::result::Result<(Vec<NoteInfo>, NoteTransportCursor), NoteTransportError> {
+            _: Option<NoteTransportCursor>,
+            _: Option<NoteTransportCursor>,
+        ) -> std::result::Result<NoteTransportPage, NoteTransportError> {
             self.fetch_calls.fetch_add(1, Ordering::SeqCst);
             let remaining = self.failures_before_success.load(Ordering::SeqCst);
             if remaining > 0 {
@@ -1041,7 +1041,16 @@ mod tests {
                     .store(remaining - 1, Ordering::SeqCst);
                 return Err((self.error)());
             }
-            Ok((Vec::new(), cursor))
+            let head = NoteTransportCursor {
+                nonce: 1,
+                sequence: 0,
+            };
+            Ok(NoteTransportPage {
+                notes: Vec::new(),
+                cursor: head,
+                has_more: false,
+                sync_to: head,
+            })
         }
     }
 
@@ -1105,10 +1114,7 @@ mod tests {
             runtime.clone(),
         );
 
-        client
-            .fetch_notes(&[], NoteTransportCursor::init())
-            .await
-            .unwrap();
+        client.fetch_notes_page(&[], None, None).await.unwrap();
 
         assert_eq!(inner.fetch_calls.load(Ordering::SeqCst), 3);
         assert_eq!(runtime.sleeps.lock().unwrap().len(), 2);
@@ -1175,10 +1181,7 @@ mod tests {
             retried_inner.clone(),
             &RpcConfig::new().with_retry_policy(RpcRetryPolicy::new(2)),
         );
-        wrapped
-            .fetch_notes(&[], NoteTransportCursor::init())
-            .await
-            .unwrap();
+        wrapped.fetch_notes_page(&[], None, None).await.unwrap();
         assert_eq!(retried_inner.fetch_calls.load(Ordering::SeqCst), 2);
 
         let passthrough_inner = Arc::new(ScriptedNoteTransportInner {
@@ -1191,10 +1194,7 @@ mod tests {
             passthrough_inner.clone(),
             &RpcConfig::new().with_retry_policy(RpcRetryPolicy::new(1)),
         );
-        passthrough
-            .fetch_notes(&[], NoteTransportCursor::init())
-            .await
-            .unwrap_err();
+        assert!(passthrough.fetch_notes_page(&[], None, None).await.is_err());
         assert_eq!(passthrough_inner.fetch_calls.load(Ordering::SeqCst), 1);
 
         let send_inner = Arc::new(ScriptedNoteTransportInner {
