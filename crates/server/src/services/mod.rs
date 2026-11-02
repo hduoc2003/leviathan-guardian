@@ -122,7 +122,7 @@ impl std::fmt::Debug for ResolvedAccount {
 #[tracing::instrument(
     level = "debug",
     skip(state, creds),
-    fields(account_id = %account_id)
+    fields(account_id = %crate::account_address::display(account_id))
 )]
 pub async fn resolve_account(
     state: &AppState,
@@ -135,7 +135,7 @@ pub async fn resolve_account(
         .await
         .map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "Failed to check account in resolve_account"
             );
@@ -156,7 +156,7 @@ pub async fn resolve_account(
 
     let signer_commitment = metadata.auth.verify(account_id, creds).map_err(|e| {
         tracing::warn!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             error = %e,
             "Authentication failed in resolve_account"
         );
@@ -184,7 +184,7 @@ pub(crate) fn validate_request_timestamp(
     let time_diff_ms = (server_now_ms - request_timestamp).abs();
     if time_diff_ms > MAX_TIMESTAMP_SKEW_MS {
         tracing::warn!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             request_timestamp = %request_timestamp,
             server_now_ms = %server_now_ms,
             time_diff_ms = %time_diff_ms,
@@ -212,7 +212,7 @@ pub(crate) async fn consume_auth_timestamp(
         .await
         .map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "Failed to update last auth timestamp"
             );
@@ -221,7 +221,7 @@ pub(crate) async fn consume_auth_timestamp(
 
     if !updated {
         tracing::warn!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             signer_commitment = %signer_commitment,
             request_timestamp = %request_timestamp,
             "Replay rejected: timestamp not greater than last seen for signer (CAS failed)"

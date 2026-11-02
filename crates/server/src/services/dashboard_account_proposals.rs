@@ -154,7 +154,7 @@ pub async fn list_account_proposals(
         .await
         .map_err(|e| {
             tracing::warn!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "dashboard proposal queue could not load proposals"
             );

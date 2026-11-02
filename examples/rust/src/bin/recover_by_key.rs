@@ -9,17 +9,37 @@
 //! ```text
 //! cargo run --bin recover_by_key -- \
 //!   --guardian http://localhost:50051 \
+//!   --network local \
 //!   --secret-key-hex 0x<hex of FalconSecretKey serialization>
 //! ```
 
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use miden_client::Serializable;
+use miden_protocol::account::AccountId;
+use miden_protocol::address::NetworkId;
 use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey;
 use miden_protocol::utils::serde::Deserializable;
 
 use guardian_client::{ClientResult, FalconKeyStore, GuardianClient};
+
+#[derive(Debug, Clone, ValueEnum)]
+enum Network {
+    Local,
+    Devnet,
+    Testnet,
+}
+
+impl Network {
+    /// Matches the GUARDIAN server, which renders local accounts with Devnet's prefix.
+    fn network_id(&self) -> NetworkId {
+        match self {
+            Network::Local | Network::Devnet => NetworkId::Devnet,
+            Network::Testnet => NetworkId::Testnet,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "recover-by-key")]
@@ -28,6 +48,10 @@ struct Args {
     /// GUARDIAN gRPC endpoint URL.
     #[arg(long, default_value = "http://localhost:50051")]
     guardian: String,
+
+    /// Network the GUARDIAN server runs on; account ids print as its bech32 addresses.
+    #[arg(long, value_enum)]
+    network: Network,
 
     /// Hex-encoded Falcon SecretKey bytes. `0x` prefix is optional.
     /// In a production wallet this is re-derived from the user's seed,
@@ -104,35 +128,34 @@ async fn main() -> ClientResult<()> {
         lookup.accounts.len(),
         if lookup.accounts.len() == 1 { "" } else { "s" }
     );
+    let network_id = args.network.network_id();
+    let mut account_ids = Vec::with_capacity(lookup.accounts.len());
     for entry in &lookup.accounts {
-        println!("      • {}", entry.account_id);
+        match AccountId::from_hex(&entry.account_id) {
+            Ok(account_id) => {
+                println!("      • {}", account_id.to_bech32(network_id.clone()));
+                account_ids.push(account_id);
+            }
+            Err(e) => println!(
+                "      ✗ Could not parse account_id '{}' returned by lookup: {e}",
+                entry.account_id
+            ),
+        }
     }
     println!();
 
     println!("Step 4: Fetch current state for each recovered account");
-    for entry in &lookup.accounts {
-        match miden_protocol::account::AccountId::from_hex(&entry.account_id) {
-            Ok(account_id) => match client.get_state(&account_id).await {
-                Ok(response) => {
-                    if let Some(state) = response.state {
-                        println!("  ✓ {}: commitment {}", state.account_id, state.commitment);
-                    } else {
-                        println!(
-                            "  ⚠ {}: state envelope returned but state is empty",
-                            entry.account_id
-                        );
-                    }
+    for account_id in &account_ids {
+        let address = account_id.to_bech32(network_id.clone());
+        match client.get_state(account_id).await {
+            Ok(response) => {
+                if let Some(state) = response.state {
+                    println!("  ✓ {address}: commitment {}", state.commitment);
+                } else {
+                    println!("  ⚠ {address}: state envelope returned but state is empty");
                 }
-                Err(e) => {
-                    println!("  ✗ {}: get_state failed: {e}", entry.account_id);
-                }
-            },
-            Err(e) => {
-                println!(
-                    "  ✗ Could not parse account_id '{}' returned by lookup: {e}",
-                    entry.account_id
-                );
             }
+            Err(e) => println!("  ✗ {address}: get_state failed: {e}"),
         }
     }
 

@@ -10,7 +10,7 @@ pub async fn action_show_status(state: &SessionState) -> Result<(), String> {
         let account = client.account().unwrap();
         println!(
             "  Current Account: {}",
-            shorten_hex(&account.id().to_string())
+            account.id().to_bech32(state.network_id())
         );
     } else {
         println!("  No account loaded");

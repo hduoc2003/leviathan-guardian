@@ -74,7 +74,10 @@ Raw Falcon and ECDSA signatures remain supported. ECDSA signers may instead send
 
 ### Account Identifiers
 
-- Miden account IDs use the existing Miden account identifier format.
+- Miden account IDs use the existing Miden account identifier format. Requests accept the bech32
+  address of the server's network (`GUARDIAN_NETWORK_TYPE`) or `0x` hex; a bech32 address of another
+  network is rejected with `invalid_input`. Responses and storage keep the `0x` hex form; log lines
+  and error messages print the bech32 address.
 - EVM account IDs are canonical strings: `evm:<chain_id>:<normalized_smart_account_address>`.
 - EVM accounts are registered through `/evm/accounts` and use `/evm/proposals*` for proposal coordination.
 

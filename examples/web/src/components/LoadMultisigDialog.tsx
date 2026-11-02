@@ -20,6 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import type { WalletSource } from '@/wallets/types';
+import { LEVIATHAN_NETWORK_PREFIX } from '@/config';
 
 interface LoadMultisigDialogProps {
   open: boolean;
@@ -77,10 +78,10 @@ export function LoadMultisigDialog({
 
         <div className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="account-id">Account ID</Label>
+            <Label htmlFor="account-id">Account Address</Label>
             <Input
               id="account-id"
-              placeholder="0x..."
+              placeholder={`${LEVIATHAN_NETWORK_PREFIX}1... or 0x...`}
               value={accountIdInput}
               onChange={(e) => setAccountIdInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleLoad()}

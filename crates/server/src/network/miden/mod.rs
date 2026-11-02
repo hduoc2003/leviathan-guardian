@@ -281,8 +281,8 @@ impl MidenNetworkClient {
             );
             return Err(format!(
                 "Account ID mismatch: expected {}, got {}",
-                account_id.to_hex(),
-                account.id().to_hex()
+                crate::account_address::display(&account_id.to_hex()),
+                crate::account_address::display(&account.id().to_hex())
             ));
         }
 
@@ -299,7 +299,7 @@ impl NetworkClient for MidenNetworkClient {
     ) -> Result<StateHead, String> {
         let account_id = AccountId::from_hex(account_id).map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "Invalid Miden account ID format in get_state_head"
             );
@@ -324,7 +324,7 @@ impl NetworkClient for MidenNetworkClient {
     ) -> Result<StateVerification, String> {
         let account_id = AccountId::from_hex(account_id).map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "Invalid Miden account ID format in verify_commitment"
             );
@@ -354,11 +354,14 @@ impl NetworkClient for MidenNetworkClient {
 
         let on_chain_commitment = rpc_result.map_err(|e| {
             tracing::error!(
-                account_id = %account_id.to_hex(),
+                account_id = %crate::account_address::display(&account_id.to_hex()),
                 error = %e,
                 "Failed to fetch account commitment from Miden network"
             );
-            format!("Failed to verify account '{account_id}' on Miden network: {e}")
+            format!(
+                "Failed to verify account '{}' on Miden network: {e}",
+                crate::account_address::display(&account_id.to_hex())
+            )
         })?;
 
         if Self::is_empty_word_digest(&on_chain_commitment) {
@@ -367,7 +370,7 @@ impl NetworkClient for MidenNetworkClient {
 
         if expected_commitment != on_chain_commitment {
             tracing::debug!(
-                account_id = %account_id.to_hex(),
+                account_id = %crate::account_address::display(&account_id.to_hex()),
                 expected = %expected_commitment,
                 on_chain = %on_chain_commitment,
                 "Commitment mismatch during state verification"
@@ -419,7 +422,7 @@ impl NetworkClient for MidenNetworkClient {
             !account_delta.code().is_empty() && prev_account.as_ref().map_or(true, Account::is_new);
         let base_account = if is_full_state {
             tracing::debug!(
-                account_id = %account_delta.id().to_hex(),
+                account_id = %crate::account_address::display(&account_delta.id().to_hex()),
                 "Processing full state delta for new account deployment"
             );
             guardian_shared::account_delta::account_from_full_delta_with_storage_patch(
@@ -458,7 +461,7 @@ impl NetworkClient for MidenNetworkClient {
             ));
 
             tracing::debug!(
-                account_id = %base_account.id().to_hex(),
+                account_id = %crate::account_address::display(&base_account.id().to_hex()),
                 tx_commitment = %format!("0x{}", hex::encode(tx_commitment.as_bytes())),
                 "Applied replay protection adjustment for multisig account"
             );
@@ -582,7 +585,7 @@ impl NetworkClient for MidenNetworkClient {
     fn validate_account_id(&self, account_id: &str) -> Result<(), String> {
         AccountId::from_hex(account_id).map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "Invalid Miden account ID format in validate_account_id"
             );
@@ -660,7 +663,7 @@ impl NetworkClient for MidenNetworkClient {
     ) -> Result<OnChainGuardianBinding, String> {
         let account_id = AccountId::from_hex(account_id).map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "Invalid Miden account ID format in fetch_on_chain_guardian_binding"
             );
@@ -690,13 +693,13 @@ impl NetworkClient for MidenNetworkClient {
         // error (the ERROR log alarm pages on node outages otherwise).
         let response = rpc_result.map_err(|e| {
             tracing::warn!(
-                account_id = %account_id.to_hex(),
+                account_id = %crate::account_address::display(&account_id.to_hex()),
                 error = %e,
                 "Failed to fetch account storage details from Miden network"
             );
             format!(
                 "Failed to read guardian binding for '{}' on Miden network: {e}",
-                account_id.to_hex()
+                crate::account_address::display(&account_id.to_hex())
             )
         })?;
 
@@ -712,7 +715,7 @@ impl NetworkClient for MidenNetworkClient {
     ) -> Result<TransactionSearch, String> {
         let account_id = AccountId::from_hex(account_id).map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "Invalid Miden account ID format in find_transaction_ending_at"
             );
@@ -741,13 +744,13 @@ impl NetworkClient for MidenNetworkClient {
             record_rpc("sync_transactions", rpc_started, page.is_ok());
             let page = page.map_err(|e| {
                 tracing::warn!(
-                    account_id = %account_id.to_hex(),
+                    account_id = %crate::account_address::display(&account_id.to_hex()),
                     error = %e,
                     "Failed to sync account transactions from Miden network"
                 );
                 format!(
                     "Failed to read transactions of '{}' on Miden network: {e}",
-                    account_id.to_hex()
+                    crate::account_address::display(&account_id.to_hex())
                 )
             })?;
             let (found, covered_through) =
@@ -765,7 +768,7 @@ impl NetworkClient for MidenNetworkClient {
             if covered_through < from {
                 return Err(format!(
                     "transaction page for '{}' made no progress past block {from}",
-                    account_id.to_hex()
+                    crate::account_address::display(&account_id.to_hex())
                 ));
             }
             if covered_through > tip {

@@ -17,7 +17,10 @@ pub async fn action_verify_state_commitment(state: &SessionState) -> Result<(), 
         .map_err(|e| format!("State commitment verification failed: {}", e))?;
 
     print_success("State commitment verified");
-    print_full_hex("  Account ID", &result.account_id.to_hex());
+    print_full_hex(
+        "  Account ID",
+        &result.account_id.to_bech32(state.network_id()),
+    );
     print_full_hex("  Local commitment", &result.local_commitment_hex);
     print_full_hex("  On-chain commitment", &result.on_chain_commitment_hex);
 

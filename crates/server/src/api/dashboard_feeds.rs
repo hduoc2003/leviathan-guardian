@@ -13,6 +13,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 
+use crate::account_address;
 use crate::dashboard::cursor::CursorKind;
 use crate::error::GuardianError;
 use crate::error::Result;
@@ -83,6 +84,7 @@ pub async fn list_account_deltas_handler(
     Path(account_id): Path<String>,
     Query(query): Query<FeedQuery>,
 ) -> Result<Json<PagedResult<DashboardDeltaEntry>>> {
+    let account_id = account_address::parse_input(state.dashboard.network_type(), account_id)?;
     let limit = parse_limit(query.limit.as_deref())?;
     let cursor = parse_cursor(
         query.cursor.as_deref(),
@@ -122,6 +124,7 @@ pub async fn list_account_delta_detail_handler(
     Path((account_id, nonce_str)): Path<(String, String)>,
     Query(query): Query<DeltaDetailQuery>,
 ) -> Result<Json<DashboardDeltaDetail>> {
+    let account_id = account_address::parse_input(state.dashboard.network_type(), account_id)?;
     let nonce = parse_canonical_nonce(&nonce_str)?;
     let include = parse_detail_include_flags(query.include.as_deref());
     let result = get_account_delta_detail(&state, &account_id, nonce, include).await?;
@@ -199,6 +202,7 @@ pub async fn list_account_proposals_handler(
     Path(account_id): Path<String>,
     Query(query): Query<FeedQuery>,
 ) -> Result<Json<PagedResult<DashboardProposalEntry>>> {
+    let account_id = account_address::parse_input(state.dashboard.network_type(), account_id)?;
     let limit = parse_limit(query.limit.as_deref())?;
     let cursor = parse_cursor(
         query.cursor.as_deref(),
@@ -391,7 +395,7 @@ mod tests {
     use crate::metadata::auth::Auth;
     use crate::testing::helpers::{TestSigner, create_router, create_test_app_state};
 
-    const FIXTURE_ACCOUNT_ID: &str = "0xacc0000000000000";
+    const FIXTURE_ACCOUNT_ID: &str = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
 
     async fn authenticate(app: &axum::Router, operator: &TestSigner) -> String {
         let challenge_response = app
@@ -570,7 +574,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/dashboard/accounts/0xunknown/deltas")
+                    .uri("/dashboard/accounts/0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d/deltas")
                     .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -766,7 +770,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/dashboard/accounts/0xnotfound/proposals")
+                    .uri("/dashboard/accounts/0x1d1d1d1c1d1d1d011d1d1d1d1d1d1d/proposals")
                     .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),

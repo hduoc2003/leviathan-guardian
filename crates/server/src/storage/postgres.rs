@@ -1720,7 +1720,7 @@ impl StorageBackend for PostgresService {
                 if superseded > 0 {
                     tracing::info!(
                         event = "reconcile_superseded",
-                        account_id = %delta.account_id,
+                        account_id = %crate::account_address::display(&delta.account_id),
                         nonce = delta.nonce,
                         "Recoverable row superseded by a new candidate at its nonce"
                     );

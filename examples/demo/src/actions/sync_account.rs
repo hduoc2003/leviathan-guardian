@@ -1,9 +1,6 @@
-use miden_multisig_client::AccountId;
 use rustyline::DefaultEditor;
 
-use crate::display::{
-    print_error, print_info, print_section, print_success, print_waiting, shorten_hex,
-};
+use crate::display::{print_error, print_info, print_section, print_success, print_waiting};
 use crate::menu::prompt_input;
 use crate::state::SessionState;
 
@@ -211,9 +208,10 @@ pub async fn action_sync_account(
         }
     } else {
         // No local account, pull from GUARDIAN
-        let account_id_hex = prompt_input(editor, "Enter account ID: ")?;
-        let account_id = AccountId::from_hex(&account_id_hex)
-            .map_err(|e| format!("Invalid account ID: {}", e))?;
+        let address = prompt_input(editor, "Enter account address: ")?;
+        let network_id = state.network_id();
+        let account_id =
+            crate::actions::proposal_management::parse_account_address(&address, &network_id)?;
 
         print_waiting("Fetching account from GUARDIAN");
 
@@ -226,7 +224,7 @@ pub async fn action_sync_account(
         print_success("Account pulled successfully");
         print_info(&format!(
             "  Account ID: {}",
-            shorten_hex(&account.id().to_string())
+            account.id().to_bech32(network_id)
         ));
         print_info(&format!("  Current nonce: {}", account.nonce()));
     }

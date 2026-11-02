@@ -36,7 +36,7 @@ pub struct CanonicalNonceResponse {
 #[tracing::instrument(
     level = "info",
     skip(state, params),
-    fields(account_id = %params.account_id)
+    fields(account_id = %crate::account_address::display(&params.account_id))
 )]
 pub async fn get_canonical_nonce(
     state: &AppState,
@@ -76,7 +76,7 @@ fn state_read_error(account_id: &str, error: String) -> GuardianError {
         return GuardianError::StateNotFound(account_id.to_string());
     }
     tracing::error!(
-        account_id = %account_id,
+        account_id = %crate::account_address::display(account_id),
         error = %error,
         "Failed to read the canonical state"
     );
@@ -104,7 +104,7 @@ async fn backfill_canonical_nonce(
         .account_nonce(&account_state.state_json)
         .map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(&account_id),
                 error = %e,
                 "Canonical state blob does not decode to an account"
             );
@@ -115,7 +115,7 @@ async fn backfill_canonical_nonce(
             // client always reads a nonce); a backend without the notion
             // cannot serve the pre-check.
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(&account_id),
                 "Network client reports no nonce for the canonical state"
             );
             GuardianError::AccountDataUnavailable(account_id.clone())
@@ -129,13 +129,13 @@ async fn backfill_canonical_nonce(
         .await
     {
         Ok(stored) => tracing::info!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(&account_id),
             nonce,
             stored,
             "Canonical state had no stored nonce; decoded it for the backfill"
         ),
         Err(e) => tracing::warn!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(&account_id),
             nonce,
             error = %e,
             "Failed to store the decoded canonical nonce; the next read decodes again"

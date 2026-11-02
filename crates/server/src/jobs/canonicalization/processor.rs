@@ -203,7 +203,7 @@ impl DeltasProcessorBase {
     /// renewal task cancels the pass at the next checkpoint.
     fn stale_lease_error(delta: &DeltaObject) -> GuardianError {
         tracing::warn!(
-            account_id = %delta.account_id,
+            account_id = %crate::account_address::display(&delta.account_id),
             nonce = delta.nonce,
             "Canonicalization lease lost; write refused by storage fence"
         );
@@ -214,7 +214,7 @@ impl DeltasProcessorBase {
     /// discarded this delta, so the write was a no-op by design.
     fn log_not_candidate(delta: &DeltaObject, operation: &str) {
         tracing::warn!(
-            account_id = %delta.account_id,
+            account_id = %crate::account_address::display(&delta.account_id),
             nonce = delta.nonce,
             operation,
             "Delta is no longer a candidate; skipping superseded write"
@@ -410,7 +410,7 @@ impl DeltasProcessorBase {
             Ok(timestamp) => timestamp.with_timezone(&Utc),
             Err(error) => {
                 tracing::warn!(
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     nonce = delta.nonce,
                     error = %error,
                     "Recent candidate has an invalid status timestamp; ending fast-pass pagination"
@@ -459,7 +459,7 @@ impl DeltasProcessorBase {
             Ok(()) => false,
             Err(e) => {
                 tracing::error!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     error = %e,
                     "Failed to process canonicalizations for account"
                 );
@@ -480,7 +480,7 @@ impl DeltasProcessorBase {
             Ok(()) => false,
             Err(e) => {
                 tracing::error!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     error = %e,
                     "Failed to process recent canonicalizations for account"
                 );
@@ -507,7 +507,7 @@ impl DeltasProcessorBase {
         // candidate committed concurrently is never masked.
         if candidates.is_empty() && account_metadata.has_pending_candidate {
             tracing::warn!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 "Account flagged with pending candidate but no candidate delta \
                  exists; clearing stale flag"
             );
@@ -519,7 +519,7 @@ impl DeltasProcessorBase {
                 .await
             {
                 tracing::warn!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     error = %e,
                     "Failed to clear stale has_pending_candidate flag"
                 );
@@ -571,13 +571,13 @@ impl DeltasProcessorBase {
 
         match self.mode {
             ProcessingMode::Full => tracing::info!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 candidates = candidates.len(),
                 "Processing delta candidates"
             ),
             ProcessingMode::PromoteRecent { .. } | ProcessingMode::ReconcileRecoverable => {
                 tracing::debug!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     candidates = candidates.len(),
                     "Processing recent delta candidates"
                 )
@@ -588,12 +588,12 @@ impl DeltasProcessorBase {
             if self.admission_closed() {
                 if self.pass.cancel.is_cancelled() {
                     tracing::warn!(
-                        account_id = %account_id,
+                        account_id = %crate::account_address::display(account_id),
                         "Canonicalization pass cancelled (lease lost); stopping before next candidate"
                     );
                 } else {
                     tracing::debug!(
-                        account_id = %account_id,
+                        account_id = %crate::account_address::display(account_id),
                         "Fast-promotion deadline reached; stopping before next candidate"
                     );
                 }
@@ -615,7 +615,7 @@ impl DeltasProcessorBase {
                 && delta.prev_commitment != current_state.commitment
             {
                 tracing::info!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     nonce = delta.nonce,
                     "Candidate does not chain from the stored state; \
                      stopping this account's pass at the first unresolved nonce"
@@ -625,7 +625,7 @@ impl DeltasProcessorBase {
             let nonce = delta.nonce;
             if let Err(e) = self.process_candidate(delta).await {
                 tracing::error!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     nonce = nonce,
                     error = %e,
                     "Failed to canonicalize delta"
@@ -697,7 +697,7 @@ impl DeltasProcessorBase {
             Ok(StateVerification::Match) => {
                 if delta.new_commitment.as_deref() != Some(recomputed_commitment.as_str()) {
                     tracing::warn!(
-                        account_id = %delta.account_id,
+                        account_id = %crate::account_address::display(&delta.account_id),
                         nonce = delta.nonce,
                         claimed = ?delta.new_commitment,
                         recomputed = %recomputed_commitment,
@@ -771,7 +771,7 @@ impl DeltasProcessorBase {
     async fn process_recent_candidate(&self, delta: DeltaObject) -> Result<()> {
         let Some(claimed_commitment) = delta.new_commitment.clone() else {
             tracing::debug!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 nonce = delta.nonce,
                 "Recent candidate has no claimed commitment; leaving it to the full pass"
             );
@@ -791,7 +791,7 @@ impl DeltasProcessorBase {
             Ok(StateVerification::Match) => {}
             Ok(_) => {
                 tracing::debug!(
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     nonce = delta.nonce,
                     "Recent candidate is not canonical yet; leaving lifecycle decisions to the full pass"
                 );
@@ -820,7 +820,7 @@ impl DeltasProcessorBase {
 
         if *recomputed_commitment != claimed_commitment {
             tracing::warn!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 nonce = delta.nonce,
                 claimed = %claimed_commitment,
                 recomputed = %recomputed_commitment,
@@ -867,7 +867,7 @@ impl DeltasProcessorBase {
         }
 
         tracing::info!(
-            account_id = %delta.account_id,
+            account_id = %crate::account_address::display(&delta.account_id),
             nonce = delta.nonce,
             confirmations,
             abandon_quarantine_checks = self.abandon_quarantine_checks,
@@ -945,7 +945,7 @@ impl DeltasProcessorBase {
             .await
         {
             tracing::warn!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 error = %e,
                 "Failed to clear has_pending_candidate flag after abandon; \
                  the stale-flag heal clears it on a later run"
@@ -954,7 +954,7 @@ impl DeltasProcessorBase {
 
         record_candidate_outcome(crate::metrics::labels::CandidateOutcome::Abandoned);
         tracing::info!(
-            account_id = %delta.account_id,
+            account_id = %crate::account_address::display(&delta.account_id),
             nonce = delta.nonce,
             "Client-abandoned candidate discarded; account released"
         );
@@ -973,7 +973,7 @@ impl DeltasProcessorBase {
         }
 
         tracing::info!(
-            account_id = %delta.account_id,
+            account_id = %crate::account_address::display(&delta.account_id),
             nonce = delta.nonce,
             divergence_count = delta.status.divergence_count(),
             "On-chain commitment back at candidate base; resetting divergence streak"
@@ -1014,7 +1014,7 @@ impl DeltasProcessorBase {
 
         if observations < self.divergence_confirmations {
             tracing::info!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 nonce = delta.nonce,
                 on_chain = %on_chain,
                 prev_commitment = %delta.prev_commitment,
@@ -1075,7 +1075,7 @@ impl DeltasProcessorBase {
         // (monotonicity guarantees it can never start matching).
         if self.retained_ttl_seconds > 0 {
             tracing::warn!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 nonce = delta.nonce,
                 on_chain = %on_chain,
                 prev_commitment = %delta.prev_commitment,
@@ -1100,7 +1100,7 @@ impl DeltasProcessorBase {
         }
 
         tracing::warn!(
-            account_id = %delta.account_id,
+            account_id = %crate::account_address::display(&delta.account_id),
             nonce = delta.nonce,
             on_chain = %on_chain,
             prev_commitment = %delta.prev_commitment,
@@ -1132,7 +1132,7 @@ impl DeltasProcessorBase {
             && candidate_age_seconds < self.submission_grace_period_seconds
         {
             tracing::info!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 nonce = delta.nonce,
                 candidate_age_seconds,
                 submission_grace_period_seconds = self.submission_grace_period_seconds,
@@ -1168,7 +1168,7 @@ impl DeltasProcessorBase {
             // stored state permanently behind the on-chain nonce.
             if self.retained_ttl_seconds > 0 {
                 tracing::warn!(
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     nonce = delta.nonce,
                     retries = new_retry,
                     max_retries = self.max_retries,
@@ -1195,7 +1195,7 @@ impl DeltasProcessorBase {
             }
 
             tracing::warn!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 nonce = delta.nonce,
                 retries = new_retry,
                 max_retries = self.max_retries,
@@ -1217,7 +1217,7 @@ impl DeltasProcessorBase {
             }
         } else {
             tracing::info!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 nonce = delta.nonce,
                 retry = new_retry,
                 max_retries = self.max_retries,
@@ -1313,7 +1313,7 @@ impl DeltasProcessorBase {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::warn!(
-                        account_id = %delta.account_id,
+                        account_id = %crate::account_address::display(&delta.account_id),
                         nonce = delta.nonce,
                         error = %e,
                         "Could not derive proposal id; \
@@ -1329,7 +1329,7 @@ impl DeltasProcessorBase {
         {
             Ok(_existing_proposal) => {
                 tracing::warn!(
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     proposal_id = %id,
                     "Deleting matching proposal as its delta left the candidate path"
                 );
@@ -1338,7 +1338,7 @@ impl DeltasProcessorBase {
                     .await
                 {
                     tracing::warn!(
-                        account_id = %delta.account_id,
+                        account_id = %crate::account_address::display(&delta.account_id),
                         proposal_id = %id,
                         error = %e,
                         "Failed to delete proposal; deferring the delta's transition"
@@ -1353,7 +1353,7 @@ impl DeltasProcessorBase {
             Err(e) if crate::storage::is_storage_not_found(&e) => true,
             Err(e) => {
                 tracing::warn!(
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     proposal_id = %id,
                     error = %e,
                     "Could not check for a matching proposal; deferring the delta's transition"
@@ -1413,7 +1413,7 @@ impl DeltasProcessorBase {
                 RetainReason::RetryExhausted => "retry_exhausted",
                 RetainReason::Diverged => "diverged",
             },
-            account_id = %delta.account_id,
+            account_id = %crate::account_address::display(&delta.account_id),
             nonce = delta.nonce,
             expires_at = expires_at.as_deref().unwrap_or("unbounded"),
             "Candidate parked as retained; account released, background \
@@ -1427,7 +1427,7 @@ impl DeltasProcessorBase {
             .await
         {
             tracing::warn!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 error = %e,
                 "Failed to clear has_pending_candidate flag after retaining; \
                  the stale-flag heal clears it on a later run"
@@ -1449,7 +1449,7 @@ impl DeltasProcessorBase {
         success_outcome: crate::metrics::labels::CandidateOutcome,
     ) -> Result<()> {
         tracing::info!(
-            account_id = %delta.account_id,
+            account_id = %crate::account_address::display(&delta.account_id),
             nonce = delta.nonce,
             "Canonicalizing delta (commitment matches on-chain)"
         );
@@ -1494,7 +1494,7 @@ impl DeltasProcessorBase {
         };
         if new_auth.is_some() {
             tracing::debug!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 "Syncing cosigner public keys from on-chain storage"
             );
         }
@@ -1538,7 +1538,7 @@ impl DeltasProcessorBase {
             }
             PromoteWrite::StaleBase => {
                 tracing::warn!(
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     nonce = delta.nonce,
                     prev_commitment = %delta.prev_commitment,
                     "Stored state moved off the candidate's base during the pass; \
@@ -1562,7 +1562,7 @@ impl DeltasProcessorBase {
                 .await
         {
             tracing::info!(
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 proposal_id = %id,
                 "Deleting matching proposal as delta is now canonical"
             );
@@ -1582,7 +1582,7 @@ impl DeltasProcessorBase {
                 .await
             {
                 tracing::warn!(
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     proposal_id = %id,
                     error = %e,
                     "Failed to delete proposal, but continuing"

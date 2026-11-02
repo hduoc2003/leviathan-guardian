@@ -226,7 +226,7 @@ pub async fn release_if_guardian_switched(
         Ok(_) => return,
         Err(e) => {
             tracing::error!(
-                account_id = %metadata.account_id,
+                account_id = %crate::account_address::display(&metadata.account_id),
                 nonce = delta_nonce,
                 error = %e,
                 "Failed to inspect guardian commitment after delta commit; \
@@ -280,7 +280,7 @@ pub async fn release_switched_account(
     {
         Ok(ReleaseTransition::Released) => {
             tracing::warn!(
-                account_id = %metadata.account_id,
+                account_id = %crate::account_address::display(&metadata.account_id),
                 detected_by = evidence.detected_by(),
                 evidence = ?evidence,
                 new_guardian_commitment = %new_guardian_commitment,
@@ -302,7 +302,7 @@ pub async fn release_switched_account(
         Ok(ReleaseTransition::AlreadyReleased) => ReleaseWrite::AlreadyReleased,
         Ok(ReleaseTransition::StateMoved) => {
             tracing::info!(
-                account_id = %metadata.account_id,
+                account_id = %crate::account_address::display(&metadata.account_id),
                 detected_by = evidence.detected_by(),
                 evidence = ?evidence,
                 "Guardian switch evidence no longer applies: the stored state was \
@@ -313,7 +313,7 @@ pub async fn release_switched_account(
         }
         Err(e) => {
             tracing::error!(
-                account_id = %metadata.account_id,
+                account_id = %crate::account_address::display(&metadata.account_id),
                 detected_by = evidence.detected_by(),
                 evidence = ?evidence,
                 error = %e,

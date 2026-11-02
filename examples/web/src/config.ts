@@ -1,5 +1,7 @@
 export const GUARDIAN_ENDPOINT = 'http://localhost:3000';
 export const MIDEN_RPC_URL = 'https://rpc.devnet.miden.io';
+// Bech32 prefix of the network MIDEN_RPC_URL serves.
+export const LEVIATHAN_NETWORK_PREFIX = 'mdev';
 export const MIDEN_DB_NAME = 'MidenClientDB';
 export const PROVER_URL = import.meta.env.VITE_PROVER_URL?.trim() || undefined;
 

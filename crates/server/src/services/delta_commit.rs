@@ -52,7 +52,7 @@ impl DeltaCommitStrategy {
                     .await
                     .map_err(|e| {
                         error!(
-                            account_id = %delta.account_id,
+                            account_id = %crate::account_address::display(&delta.account_id),
                             nonce = delta.nonce,
                             error = %e,
                             "Failed to submit candidate delta"
@@ -63,7 +63,7 @@ impl DeltaCommitStrategy {
                     CandidateSubmission::Submitted => Ok(()),
                     CandidateSubmission::Conflict => {
                         warn!(
-                            account_id = %delta.account_id,
+                            account_id = %crate::account_address::display(&delta.account_id),
                             nonce = delta.nonce,
                             "Candidate submission lost the commit race; rejecting as pending-delta conflict"
                         );
@@ -96,7 +96,7 @@ impl DeltaCommitStrategy {
                     .await
                     .map_err(|e| {
                         error!(
-                            account_id = %delta.account_id,
+                            account_id = %crate::account_address::display(&delta.account_id),
                             error = %e,
                             "Failed to update state in optimistic mode"
                         );
@@ -109,7 +109,7 @@ impl DeltaCommitStrategy {
                     .await
                     .map_err(|e| {
                         error!(
-                            account_id = %delta.account_id,
+                            account_id = %crate::account_address::display(&delta.account_id),
                             nonce = delta.nonce,
                             error = %e,
                             "Failed to submit canonical delta in optimistic mode"
@@ -134,7 +134,7 @@ impl DeltaCommitStrategy {
                     {
                         Ok(_existing_proposal) => {
                             info!(
-                                account_id = %delta.account_id,
+                                account_id = %crate::account_address::display(&delta.account_id),
                                 proposal_id = %id,
                                 "Deleting matching proposal as delta is now canonical"
                             );
@@ -158,7 +158,7 @@ impl DeltaCommitStrategy {
                                 .await
                             {
                                 warn!(
-                                    account_id = %delta.account_id,
+                                    account_id = %crate::account_address::display(&delta.account_id),
                                     proposal_id = %id,
                                     error = %e,
                                     "Failed to delete proposal, but continuing"
@@ -167,7 +167,7 @@ impl DeltaCommitStrategy {
                         }
                         Err(e) => {
                             debug!(
-                                account_id = %delta.account_id,
+                                account_id = %crate::account_address::display(&delta.account_id),
                                 proposal_id = %id,
                                 error = %e,
                                 "No matching proposal to finalize after canonical delta \

@@ -114,7 +114,7 @@ pub async fn get_account_delta_detail(
                 }
             } else {
                 tracing::warn!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     nonce,
                     error = %err,
                     "dashboard delta detail could not load delta from storage"

@@ -108,7 +108,7 @@ pub async fn register_account(
     let now = state.clock.now_rfc3339();
     let existing = state.metadata.get(&account_id).await.map_err(|e| {
         tracing::error!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(&account_id),
             error = %e,
             "Failed to check existing EVM account"
         );
@@ -137,7 +137,7 @@ pub async fn register_account(
         .await
         .map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(&account_id),
                 error = %e,
                 "Failed to store EVM metadata"
             );

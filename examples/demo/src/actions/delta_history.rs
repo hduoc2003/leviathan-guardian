@@ -1,6 +1,8 @@
 use rustyline::DefaultEditor;
 
-use crate::display::{print_info, print_section, print_success, print_waiting, shorten_hex};
+use crate::display::{
+    account_address, print_info, print_section, print_success, print_waiting, shorten_hex,
+};
 use crate::state::SessionState;
 
 const PAGE_SIZE: u32 = 10;
@@ -60,7 +62,10 @@ pub async fn action_delta_history(
                         note.note_type.as_str()
                     );
                     if let Some(recipient) = &note.recipient {
-                        line.push_str(&format!(" -> {}", shorten_hex(recipient)));
+                        line.push_str(&format!(
+                            " -> {}",
+                            account_address(recipient, state.network_id())?
+                        ));
                     }
                     println!("{line}");
                 }

@@ -148,7 +148,7 @@ pub async fn list_dashboard_accounts_paged(
                     Err(e) if crate::storage::is_storage_not_found(&e) => {}
                     Err(e) if crate::storage::is_record_corruption(&e) => {
                         tracing::warn!(
-                            account_id = %id,
+                            account_id = %crate::account_address::display(id),
                             error = %e,
                             "dashboard account list: stored state is corrupt; reported as unavailable"
                         );
@@ -232,7 +232,7 @@ pub async fn get_dashboard_account(
         .await
         .map_err(|error| {
             tracing::warn!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %error,
                 "Dashboard account detail could not load state"
             );

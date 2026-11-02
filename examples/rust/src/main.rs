@@ -13,6 +13,7 @@ use miden_client::{Client, ClientError, Deserializable, Felt, Serializable, Word
 use miden_client_sqlite_store::SqliteStore;
 
 use miden_protocol::account::auth::Signature as AccountSignature;
+use miden_protocol::address::NetworkId;
 use miden_protocol::crypto::dsa::falcon512_poseidon2::Signature as RawFalconSignature;
 use miden_standards::account::auth::{FeeConversionInfo, MultisigAuthArgs};
 
@@ -42,6 +43,16 @@ enum Network {
     Local,
     Devnet,
     Testnet,
+}
+
+impl Network {
+    /// Matches the GUARDIAN server, which renders local accounts with Devnet's prefix.
+    fn network_id(&self) -> NetworkId {
+        match self {
+            Network::Local | Network::Devnet => NetworkId::Devnet,
+            Network::Testnet => NetworkId::Testnet,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -184,7 +195,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let account_id = account.id();
-    println!("  ✓ Account ID: {}", account_id);
+    println!(
+        "  ✓ Account ID: {}",
+        account_id.to_bech32(args.network.network_id())
+    );
     println!("  ✓ Multisig: 2-of-2 with GUARDIAN");
 
     if let Err(e) = add_account_and_sync(&mut miden_client, &account).await {

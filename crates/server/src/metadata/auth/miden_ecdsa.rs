@@ -77,7 +77,7 @@ fn account_id_timestamp_to_digest(
         .map(|request| request.to_word())
         .map_err(|e| {
             tracing::error!(
-                account_id = %account_id_hex,
+                account_id = %crate::account_address::display(account_id_hex),
                 error = %e,
                 "Invalid account ID hex in ECDSA account_id_timestamp_to_digest"
             );
@@ -155,7 +155,7 @@ fn recover_authorized_public_key(
             }
 
             tracing::warn!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 recovered_commitment = %recovered_commitment,
                 authorized_count = authorized_commitments.len(),
                 "Recovered ECDSA public key commitment not authorized; trying provided x-pubkey"
@@ -164,7 +164,7 @@ fn recover_authorized_public_key(
         }
         Err(_) => {
             tracing::warn!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 "ECDSA public key recovery failed; trying provided x-pubkey"
             );
             None
@@ -182,7 +182,7 @@ fn authorized_public_key_from_header(
 
     if !authorized_commitments.contains(&provided_commitment) {
         tracing::error!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             provided_commitment = %provided_commitment,
             authorized_count = authorized_commitments.len(),
             "ECDSA signature verification failed: provided public key commitment not authorized"
@@ -212,7 +212,7 @@ fn verify_with_public_key(
         Ok(())
     } else {
         tracing::error!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             timestamp = %timestamp,
             sig_commitment = %commitment_hex,
             "ECDSA signature verification failed: invalid signature"

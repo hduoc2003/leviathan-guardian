@@ -223,7 +223,7 @@ pub async fn list_account_deltas(
         .await
         .map_err(|e| {
             tracing::warn!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "dashboard delta feed could not load deltas"
             );

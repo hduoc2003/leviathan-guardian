@@ -430,17 +430,38 @@ impl GuardianError {
 impl fmt::Display for GuardianError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GuardianError::AccountNotFound(id) => write!(f, "Account '{id}' not found"),
-            GuardianError::AccountAlreadyExists(id) => write!(f, "Account '{id}' already exists"),
+            GuardianError::AccountNotFound(id) => write!(
+                f,
+                "Account '{}' not found",
+                crate::account_address::display(id)
+            ),
+            GuardianError::AccountAlreadyExists(id) => {
+                write!(
+                    f,
+                    "Account '{}' already exists",
+                    crate::account_address::display(id)
+                )
+            }
             GuardianError::AccountDataUnavailable(id) => {
-                write!(f, "Account data unavailable for '{id}'")
+                write!(
+                    f,
+                    "Account data unavailable for '{}'",
+                    crate::account_address::display(id)
+                )
             }
             GuardianError::InvalidAccountId(msg) => write!(f, "Invalid account ID: {msg}"),
-            GuardianError::StateNotFound(id) => write!(f, "State not found for account '{id}'"),
+            GuardianError::StateNotFound(id) => {
+                write!(
+                    f,
+                    "State not found for account '{}'",
+                    crate::account_address::display(id)
+                )
+            }
             GuardianError::DeltaNotFound { account_id, nonce } => {
                 write!(
                     f,
-                    "Delta not found for account '{account_id}' at nonce {nonce}"
+                    "Delta not found for account '{}' at nonce {nonce}",
+                    crate::account_address::display(account_id)
                 )
             }
             GuardianError::InvalidDelta(msg) => write!(f, "Invalid delta: {msg}"),
@@ -479,7 +500,8 @@ impl fmt::Display for GuardianError {
             } => {
                 write!(
                     f,
-                    "Proposal not found for account '{account_id}' with commitment '{commitment}'"
+                    "Proposal not found for account '{}' with commitment '{commitment}'",
+                    crate::account_address::display(account_id)
                 )
             }
             GuardianError::ProposalAlreadySigned { signer_id } => {
@@ -547,8 +569,9 @@ impl fmt::Display for GuardianError {
             ),
             GuardianError::CandidateLanded { account_id, nonce } => write!(
                 f,
-                "Candidate at nonce {nonce} for account '{account_id}' already \
-                 landed on-chain; cannot abandon"
+                "Candidate at nonce {nonce} for account '{}' already \
+                 landed on-chain; cannot abandon",
+                crate::account_address::display(account_id)
             ),
         }
     }

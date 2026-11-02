@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import type { HistoryEntry, Multisig } from '@openzeppelin/miden-multisig-client';
+import { displayAccountId } from '@/lib/accountAddress';
 
 const PAGE_SIZE = 10;
 
@@ -85,7 +86,7 @@ export function DeltaHistoryCard({ multisig }: DeltaHistoryCardProps) {
               ({ note, direction }) => (
                 <p key={`${direction}-${note.noteId}`} className="text-muted-foreground">
                   {direction}: {note.tag} note {shorten(note.noteId)} ({note.noteType})
-                  {note.recipient ? ` → ${shorten(note.recipient)}` : ''}
+                  {note.recipient ? ` → ${displayAccountId(note.recipient)}` : ''}
                 </p>
               ),
             )}

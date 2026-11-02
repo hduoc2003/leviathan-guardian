@@ -33,7 +33,7 @@ pub async fn get_delta_proposals(
         .await
         .map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(&account_id),
                 error = %e,
                 "Failed to load delta proposals"
             );

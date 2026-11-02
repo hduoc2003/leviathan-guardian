@@ -940,7 +940,7 @@ pub async fn build_payload(
                         Err(error) => {
                             tracing::warn!(
                                 target: "dashboard.stats",
-                                account_id = %id,
+                                account_id = %crate::account_address::display(&id),
                                 %error,
                                 "dashboard stats: stored Miden account did not decode"
                             );
@@ -1075,7 +1075,7 @@ async fn read_states_chunk(
             Err(error) if is_record_corruption(&error) => {
                 tracing::warn!(
                     target: "dashboard.stats",
-                    account_id = %id,
+                    account_id = %crate::account_address::display(id),
                     %error,
                     "dashboard stats: stored state is corrupt; reported as state_undecodable"
                 );

@@ -38,7 +38,10 @@ impl Auditor for LogAuditor {
             occurred_at = %Utc::now().to_rfc3339(),
             operator_identity = %event.operator_identity,
             action_kind = %event.action_kind,
-            target_account_id = ?event.target_account_id,
+            target_account_id = ?event
+                .target_account_id
+                .as_deref()
+                .map(crate::account_address::display),
             payload = %payload,
             outcome = %event.outcome.as_str(),
             error_code = ?event.error_code,

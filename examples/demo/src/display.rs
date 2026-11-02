@@ -1,5 +1,13 @@
 use miden_multisig_client::{Asset, MultisigAccount};
+use miden_protocol::account::AccountId;
 use miden_protocol::address::NetworkId;
+
+/// A hex account id the guardian returned, as the bech32 address people read.
+pub fn account_address(account_id_hex: &str, network_id: NetworkId) -> Result<String, String> {
+    AccountId::from_hex(account_id_hex)
+        .map(|id| id.to_bech32(network_id))
+        .map_err(|e| format!("invalid account id '{account_id_hex}': {e}"))
+}
 
 pub fn shorten_hex(hex: &str) -> String {
     if hex.len() <= 12 {
@@ -48,9 +56,8 @@ pub fn print_warning(message: &str) {
 
 pub fn print_account_info(account: &MultisigAccount, network_id: NetworkId) {
     print_section("Account Information");
-    println!("  Account ID:     {}", account.id().to_hex());
     println!(
-        "  Address:        {}",
+        "  Account ID:     {}",
         account.inner().id().to_bech32(network_id)
     );
     println!(
@@ -98,7 +105,7 @@ pub fn print_storage_overview(
     println!("  GUARDIAN Endpoint: {}", guardian_endpoint);
 }
 
-pub fn print_vault(account: &MultisigAccount) {
+pub fn print_vault(account: &MultisigAccount, network_id: NetworkId) {
     print_section("Vault (Account Balance)");
 
     let vault = account.inner().vault();
@@ -117,14 +124,14 @@ pub fn print_vault(account: &MultisigAccount) {
                     "  [{}] {} tokens (faucet: {})",
                     i + 1,
                     fungible.amount(),
-                    shorten_hex(&fungible.faucet_id().to_hex())
+                    fungible.faucet_id().to_bech32(network_id.clone())
                 );
             }
             None => {
                 println!(
                     "  [{}] NFT (faucet: {})",
                     i + 1,
-                    shorten_hex(&asset.faucet_id().to_hex())
+                    asset.faucet_id().to_bech32(network_id.clone())
                 );
             }
         }

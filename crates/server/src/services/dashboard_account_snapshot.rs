@@ -108,7 +108,7 @@ pub async fn get_account_snapshot(
 
     let account_state = state.storage.pull_state(account_id).await.map_err(|e| {
         tracing::warn!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             error = %e,
             "Dashboard snapshot could not load state"
         );
@@ -118,7 +118,7 @@ pub async fn get_account_snapshot(
     let account =
         miden_protocol::account::Account::from_json(&account_state.state_json).map_err(|e| {
             tracing::warn!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 error = %e,
                 "Dashboard snapshot could not decode stored Miden Account"
             );

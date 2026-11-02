@@ -1149,7 +1149,7 @@ one implicitly.
 
 | Method | Description |
 |--------|-------------|
-| `accountId` | Get account ID (hex string) |
+| `accountId` | Get account ID (hex string; show it with `toAccountAddress(accountId, networkId)`, parse input with `parseAccountAddress(input, networkId)`) |
 | `threshold` | Get current threshold |
 | `signerCommitments` | Get list of signer commitments |
 | `fetchState()` | Fetch latest state from GUARDIAN |

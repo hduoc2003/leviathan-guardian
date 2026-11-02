@@ -18,6 +18,8 @@ import type {
   SignatureScheme,
 } from '@openzeppelin/miden-multisig-client';
 import { USER_PROCEDURES } from '@/lib/procedures';
+import { displayAccountId } from '@/lib/accountAddress';
+import { LEVIATHAN_NETWORK_PREFIX } from '@/config';
 
 type ProposalType = 'add_signer' | 'remove_signer' | 'change_threshold' | 'update_procedure_threshold' | 'consume_notes' | 'p2id' | 'switch_guardian';
 
@@ -461,7 +463,7 @@ export function CreateProposalForm({
                             <p className="text-xs text-muted-foreground">
                               {note.assets.map((a, i) => (
                                 <span key={i}>
-                                  {formatAmount(a.amount)} from {a.faucetId.slice(0, 10)}...
+                                  {formatAmount(a.amount)} from {displayAccountId(a.faucetId)}
                                   {i < note.assets.length - 1 && ', '}
                                 </span>
                               ))}
@@ -492,9 +494,9 @@ export function CreateProposalForm({
             ) : (
               <>
                 <div className="space-y-2">
-                  <Label>Recipient Account ID</Label>
+                  <Label>Recipient Address</Label>
                   <Input
-                    placeholder="0x..."
+                    placeholder={`${LEVIATHAN_NETWORK_PREFIX}1... or 0x...`}
                     value={recipientId}
                     onChange={(e) => setRecipientId(e.target.value)}
                   />
@@ -510,7 +512,7 @@ export function CreateProposalForm({
                       {vaultBalances.map((balance) => (
                         <SelectItem key={balance.faucetId} value={balance.faucetId}>
                           <span className="font-mono text-xs">
-                            {balance.faucetId.slice(0, 10)}...{balance.faucetId.slice(-6)}
+                            {displayAccountId(balance.faucetId)}
                           </span>
                           <span className="ml-2 text-muted-foreground">
                             (Balance: {balance.amount.toString()})

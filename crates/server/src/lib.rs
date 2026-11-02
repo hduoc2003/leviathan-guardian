@@ -1,5 +1,6 @@
 pub use guardian_shared::{FromJson, ToJson};
 
+pub mod account_address;
 pub mod ack;
 pub mod api;
 pub mod audit;

@@ -8,6 +8,7 @@ import { CreateProposalForm } from './CreateProposalForm';
 import { CandidateWarningBanner } from './CandidateWarningBanner';
 import { DeltaHistoryCard } from './DeltaHistoryCard';
 import { copyToClipboard } from '@/lib/helpers';
+import { displayAccountId } from '@/lib/accountAddress';
 import { USER_PROCEDURES } from '@/lib/procedures';
 import type {
   Multisig,
@@ -108,11 +109,11 @@ export function MultisigDashboard({
             <div>
               <span className="text-muted-foreground">Account ID</span>
               <code
-                onClick={() => copyToClipboard(multisig.accountId, () => toast.success('Account ID copied'))}
+                onClick={() => copyToClipboard(displayAccountId(multisig.accountId), () => toast.success('Account address copied'))}
                 className="block mt-1 text-xs bg-muted px-2 py-1 rounded cursor-pointer hover:bg-muted/80 truncate"
                 title="Click to copy"
               >
-                {multisig.accountId}
+                {displayAccountId(multisig.accountId)}
               </code>
             </div>
             <div>
@@ -176,11 +177,11 @@ export function MultisigDashboard({
                   className="flex items-center justify-between text-sm border-b pb-2 last:border-0 last:pb-0"
                 >
                   <code
-                    onClick={() => copyToClipboard(balance.faucetId, () => toast.success('Faucet ID copied'))}
+                    onClick={() => copyToClipboard(displayAccountId(balance.faucetId), () => toast.success('Faucet address copied'))}
                     className="text-xs bg-muted px-2 py-1 rounded cursor-pointer hover:bg-muted/80 truncate max-w-[200px]"
-                    title={balance.faucetId}
+                    title={displayAccountId(balance.faucetId)}
                   >
-                    {balance.faucetId.slice(0, 10)}...{balance.faucetId.slice(-6)}
+                    {displayAccountId(balance.faucetId)}
                   </code>
                   <Badge variant="secondary" className="font-mono">
                     {balance.amount.toString()}

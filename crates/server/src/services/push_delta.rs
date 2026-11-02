@@ -24,7 +24,7 @@ pub struct PushDeltaResult {
 #[tracing::instrument(
     level = "info",
     skip(state, params),
-    fields(account_id = %params.delta.account_id)
+    fields(account_id = %crate::account_address::display(&params.delta.account_id))
 )]
 pub async fn push_delta(state: &AppState, params: PushDeltaParams) -> Result<PushDeltaResult> {
     tracing::debug!("Pushing delta");
@@ -44,7 +44,7 @@ pub async fn push_delta(state: &AppState, params: PushDeltaParams) -> Result<Pus
         .await
         .map_err(|e| {
             tracing::error!(
-                account_id = %params.delta.account_id,
+                account_id = %crate::account_address::display(&params.delta.account_id),
                 error = %e,
                 "Failed to fetch account state in push_delta"
             );
@@ -58,7 +58,7 @@ pub async fn push_delta(state: &AppState, params: PushDeltaParams) -> Result<Pus
         .await
         .map_err(|e| {
             tracing::error!(
-                account_id = %params.delta.account_id,
+                account_id = %crate::account_address::display(&params.delta.account_id),
                 error = %e,
                 "Failed to check deltas in push_delta"
             );
@@ -170,7 +170,7 @@ async fn lookup_matching_proposal_payload(
             Ok(id) => id,
             Err(err) => {
                 tracing::debug!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     nonce,
                     error = %err,
                     "delta_proposal_id could not compute an id for this payload; \
@@ -189,14 +189,14 @@ async fn lookup_matching_proposal_payload(
         Err(err) => {
             if crate::storage::is_storage_not_found(&err) {
                 tracing::debug!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     nonce,
                     proposal_id = %proposal_id,
                     "no matching delta_proposal row (single-key push or unrelated payload)"
                 );
             } else {
                 tracing::warn!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     nonce,
                     proposal_id = %proposal_id,
                     error = %err,

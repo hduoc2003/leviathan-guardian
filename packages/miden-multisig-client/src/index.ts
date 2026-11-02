@@ -56,6 +56,7 @@ export type {
 export type { ProverConfig, ProverRetryPolicy } from './prover/config.js';
 export type { RpcConfig, RpcRetryPolicy } from './rpc/config.js';
 export { lookupAuthDigest } from './lookupAuth.js';
+export { networkIdFromPrefix, parseAccountAddress, toAccountAddress } from './address.js';
 export {
   Multisig,
   type AccountState,

@@ -8,7 +8,7 @@ pub async fn action_show_account(state: &SessionState) -> Result<(), String> {
         .ok_or_else(|| "No account loaded".to_string())?;
 
     print_account_info(account, state.network_id());
-    print_vault(account);
+    print_vault(account, state.network_id());
     print_storage_overview(account, state.is_ecdsa(), client.guardian_endpoint());
 
     Ok(())

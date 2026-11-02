@@ -28,7 +28,7 @@ pub struct SignDeltaProposalResult {
     level = "info",
     skip(state, params),
     fields(
-        account_id = %params.account_id,
+        account_id = %crate::account_address::display(&params.account_id),
         commitment = %params.commitment,
         signer_commitment = tracing::field::Empty,
         total_signatures = tracing::field::Empty

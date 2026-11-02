@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::account_address;
 use crate::dashboard::cursor::CursorKind;
 use crate::dashboard::{AuthenticatedOperator, extract_cookie};
 use crate::error::{GuardianError, Result};
@@ -376,6 +377,7 @@ pub async fn get_operator_account(
     Extension(_operator): Extension<AuthenticatedOperator>,
     Path(account_id): Path<String>,
 ) -> Result<Json<DashboardAccountDetail>> {
+    let account_id = account_address::parse_input(state.dashboard.network_type(), account_id)?;
     let response = get_dashboard_account(&state, &account_id).await?;
     Ok(Json(response.account))
 }
@@ -401,6 +403,7 @@ pub async fn get_operator_account_snapshot(
     Extension(_operator): Extension<AuthenticatedOperator>,
     Path(account_id): Path<String>,
 ) -> Result<Json<DashboardAccountSnapshot>> {
+    let account_id = account_address::parse_input(state.dashboard.network_type(), account_id)?;
     let snapshot = get_account_snapshot(&state, &account_id).await?;
     Ok(Json(snapshot))
 }
@@ -439,6 +442,7 @@ pub async fn pause_account_handler(
     Path(account_id): Path<String>,
     request: axum::extract::Request,
 ) -> Result<Json<PauseResponse>> {
+    let account_id = account_address::parse_input(state.dashboard.network_type(), account_id)?;
     let client_ip = crate::middleware::client_ip::extract_client_ip(&request);
     let (_parts, body) = request.into_parts();
     let bytes = axum::body::to_bytes(body, 1024 * 16)
@@ -474,6 +478,7 @@ pub async fn unpause_account_handler(
     Path(account_id): Path<String>,
     request: axum::extract::Request,
 ) -> Result<Json<UnpauseResponse>> {
+    let account_id = account_address::parse_input(state.dashboard.network_type(), account_id)?;
     let client_ip = crate::middleware::client_ip::extract_client_ip(&request);
     let (_parts, body) = request.into_parts();
     let bytes = axum::body::to_bytes(body, 1024 * 16)
@@ -1471,7 +1476,7 @@ mod tests {
         )]));
         seed_account(
             &state,
-            create_metadata("missing-state-account", "2024-01-01T00:00:00Z"),
+            create_metadata("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b", "2024-01-01T00:00:00Z"),
             None,
         )
         .await;
@@ -1483,7 +1488,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/dashboard/accounts/missing-state-account")
+                    .uri("/dashboard/accounts/0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b")
                     .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),

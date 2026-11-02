@@ -72,6 +72,15 @@ mod tests {
     }
 
     #[test]
+    fn testnet_address_matches_the_ts_sdk_fixture() {
+        let account_id = AccountId::from_hex(ACCOUNT_HEX).unwrap();
+        assert_eq!(
+            account_id.to_bech32(NetworkId::Testnet),
+            "mtst1apahk7m60dahkqtm0dahk7mm0v5yjjjx"
+        );
+    }
+
+    #[test]
     fn rejects_anything_else_by_name() {
         let error = parse_account_id("faucet").unwrap_err().to_string();
         assert!(

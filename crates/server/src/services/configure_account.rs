@@ -27,7 +27,7 @@ pub struct ConfigureAccountResult {
 #[tracing::instrument(
     level = "info",
     skip(state, params),
-    fields(account_id = %params.account_id)
+    fields(account_id = %crate::account_address::display(&params.account_id))
 )]
 pub async fn configure_account(
     state: &AppState,
@@ -57,7 +57,7 @@ pub async fn configure_account(
 
     let existing = state.metadata.get(&params.account_id).await.map_err(|e| {
         tracing::error!(
-            account_id = %params.account_id,
+            account_id = %crate::account_address::display(&params.account_id),
             error = %e,
             "Failed to check existing account in configure_account"
         );
@@ -77,7 +77,7 @@ pub async fn configure_account(
             .validate_credential(&params.initial_state, &params.credential, &params.auth)
             .map_err(|e| {
                 tracing::error!(
-                    account_id = %params.account_id,
+                    account_id = %crate::account_address::display(&params.account_id),
                     error = %e,
                     "Failed to validate credential"
                 );
@@ -88,7 +88,7 @@ pub async fn configure_account(
             .validate_guardian_commitment(&params.initial_state, &expected_guardian_commitment)
             .map_err(|e| {
                 tracing::error!(
-                    account_id = %params.account_id,
+                    account_id = %crate::account_address::display(&params.account_id),
                     expected_guardian_commitment = %expected_guardian_commitment,
                     error = %e,
                     "Unauthorized account configuration: invalid GUARDIAN public key binding"
@@ -110,7 +110,7 @@ pub async fn configure_account(
             .await
             .map_err(|e| {
                 tracing::error!(
-                    account_id = %params.account_id,
+                    account_id = %crate::account_address::display(&params.account_id),
                     error = %e,
                     "Failed to extract signer commitments from initial state"
                 );
@@ -122,7 +122,7 @@ pub async fn configure_account(
             && expected_auth != params.auth
         {
             tracing::error!(
-                account_id = %params.account_id,
+                account_id = %crate::account_address::display(&params.account_id),
                 expected = ?expected_auth,
                 provided = ?params.auth,
                 "Cosigner commitments do not match account state in configure_account"
@@ -140,7 +140,7 @@ pub async fn configure_account(
             .verify(&params.account_id, &params.credential)
             .map_err(|e| {
                 tracing::error!(
-                    account_id = %params.account_id,
+                    account_id = %crate::account_address::display(&params.account_id),
                     error = %e,
                     "Signature verification failed in configure_account"
                 );
@@ -186,7 +186,7 @@ pub async fn configure_account(
         .await
         .map_err(|e| {
             tracing::error!(
-                account_id = %params.account_id,
+                account_id = %crate::account_address::display(&params.account_id),
                 error = %e,
                 "Failed to submit initial state"
             );
@@ -218,7 +218,7 @@ pub async fn configure_account(
 
     state.metadata.set(metadata_entry).await.map_err(|e| {
         tracing::error!(
-            account_id = %params.account_id,
+            account_id = %crate::account_address::display(&params.account_id),
             error = %e,
             "Failed to store metadata"
         );
@@ -264,7 +264,7 @@ pub async fn configure_account(
             .await
             .map_err(|e| {
                 tracing::error!(
-                    account_id = %params.account_id,
+                    account_id = %crate::account_address::display(&params.account_id),
                     error = %e,
                     "Failed to clear released state during re-onboarding"
                 );
@@ -272,12 +272,12 @@ pub async fn configure_account(
             })?;
         match cleared {
             ClearTransition::Cleared => tracing::info!(
-                account_id = %params.account_id,
+                account_id = %crate::account_address::display(&params.account_id),
                 "Reactivated released account via /configure re-onboarding"
             ),
             ClearTransition::NotReleased => {}
             ClearTransition::StateMoved => tracing::warn!(
-                account_id = %params.account_id,
+                account_id = %crate::account_address::display(&params.account_id),
                 "A delta replaced the re-onboarded state before its release was cleared; \
                  the release of that later state stands"
             ),

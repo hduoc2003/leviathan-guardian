@@ -190,7 +190,7 @@ impl DeltasProcessorBase {
             Ok(()) => false,
             Err(e) => {
                 tracing::error!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     error = %e,
                     "Failed to reconcile recoverable deltas for account"
                 );
@@ -260,7 +260,7 @@ impl DeltasProcessorBase {
                 }
                 tracing::warn!(
                     event = "reconcile_expired",
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     nonce = delta.nonce,
                     age_seconds = age,
                     retention_reason = decode_recoverable_reason(&delta.status),
@@ -282,7 +282,7 @@ impl DeltasProcessorBase {
                     }
                     Err(e) => {
                         tracing::error!(
-                            account_id = %delta.account_id,
+                            account_id = %crate::account_address::display(&delta.account_id),
                             nonce = delta.nonce,
                             error = %e,
                             "Failed to drop expired retained delta"
@@ -346,7 +346,7 @@ impl DeltasProcessorBase {
                 tracing::debug!(
                     event = "reconcile_deferred",
                     reason = "chain_at_stored_base",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     recoverable = live.len(),
                     age_seconds = min_age,
                     "Chain still at the stored base; nothing to reconcile"
@@ -357,7 +357,7 @@ impl DeltasProcessorBase {
                 tracing::info!(
                     event = "reconcile_deferred",
                     reason = "chain_probe_unavailable",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     age_seconds = min_age,
                     error = %e,
                     "Chain probe unavailable; deferring reconciliation"
@@ -401,7 +401,7 @@ impl DeltasProcessorBase {
                 tracing::debug!(
                     event = "reconcile_skipped",
                     reason = "obsolete_base",
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     nonce = delta.nonce,
                     age_seconds,
                     "Recoverable delta no longer chains from the stored base"
@@ -417,7 +417,7 @@ impl DeltasProcessorBase {
                 tracing::debug!(
                     event = "reconcile_deferred",
                     reason = "end_state_not_on_chain",
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     nonce = delta.nonce,
                     age_seconds,
                     "Recoverable delta's end state is not what the chain shows"
@@ -445,7 +445,7 @@ impl DeltasProcessorBase {
                     tracing::info!(
                         event = "reconcile_deferred",
                         reason = "base_no_longer_applies",
-                        account_id = %delta.account_id,
+                        account_id = %crate::account_address::display(&delta.account_id),
                         nonce = delta.nonce,
                         age_seconds,
                         error = %GuardianError::from(e),
@@ -462,7 +462,7 @@ impl DeltasProcessorBase {
                 tracing::info!(
                     event = "reconcile_deferred",
                     reason = "recomputed_commitment_mismatch",
-                    account_id = %delta.account_id,
+                    account_id = %crate::account_address::display(&delta.account_id),
                     nonce = delta.nonce,
                     age_seconds,
                     "Recoverable delta reconstructs to a commitment the chain \
@@ -476,7 +476,7 @@ impl DeltasProcessorBase {
 
             tracing::info!(
                 event = "reconcile_promoted",
-                account_id = %delta.account_id,
+                account_id = %crate::account_address::display(&delta.account_id),
                 nonce = delta.nonce,
                 age_seconds,
                 retention_reason = decode_recoverable_reason(&delta.status),
@@ -498,7 +498,7 @@ impl DeltasProcessorBase {
         tracing::info!(
             event = "reconcile_deferred",
             reason = "no_matching_recoverable_delta",
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             on_chain = %on_chain,
             "Chain advanced past the stored base but no recoverable delta \
              matches it; deferring"

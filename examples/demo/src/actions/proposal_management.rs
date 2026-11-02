@@ -17,8 +17,8 @@ use miden_protocol::note::NoteType;
 use rustyline::DefaultEditor;
 
 use crate::display::{
-    print_error, print_full_hex, print_info, print_section, print_success, print_waiting,
-    print_warning, shorten_hex,
+    account_address, print_error, print_full_hex, print_info, print_section, print_success,
+    print_waiting, print_warning, shorten_hex,
 };
 use crate::menu::prompt_input;
 use crate::state::{CustomProposalRecipe, SessionState};
@@ -791,9 +791,8 @@ async fn action_import_and_work(
     .await?;
 
     print_success("Proposal imported successfully!");
-    print_proposal_details(&proposal);
-
     state.set_imported_proposal(proposal);
+    print_imported_proposal(state)?;
 
     work_with_imported(state, editor).await
 }
@@ -829,11 +828,10 @@ async fn sign_imported_proposal(
     state: &mut SessionState,
     editor: &mut DefaultEditor,
 ) -> Result<(), String> {
+    print_imported_proposal(state)?;
     let mut proposal = state
         .take_imported_proposal()
         .ok_or_else(|| "No imported proposal".to_string())?;
-
-    print_proposal_details(&proposal);
 
     let confirm = prompt_input(editor, "\nSign this proposal? [y/N]: ")?;
     if confirm.to_lowercase() != "y" {
@@ -898,7 +896,7 @@ async fn execute_imported_proposal(
         .ok_or_else(|| "No imported proposal".to_string())?
         .clone();
 
-    print_proposal_details(&proposal);
+    print_proposal_details(&proposal, state.network_id())?;
 
     if !proposal.is_ready() {
         return Err(format!(
@@ -990,7 +988,7 @@ async fn create_proposal_offline(
         .map_err(|e| format!("Failed to create offline proposal: {}", e))?;
 
     print_success("Proposal created offline!");
-    print_proposal_details(&proposal);
+    print_proposal_details(&proposal, state.network_id())?;
 
     // Ask to save
     let default_path = format!(
@@ -1255,20 +1253,23 @@ fn prompt_remove_cosigner(
     Ok(TransactionType::remove_cosigner(commitment))
 }
 
-/// Parses an account address as a `0x` hex account ID or a bech32m address
-/// (e.g. `mdev1...`), the form faucets and explorers show. A bech32m address
-/// names its network, which has to be the session's.
-fn parse_account_address(input: &str, expected_network: &NetworkId) -> Result<AccountId, String> {
-    let (network_id, account_id) =
-        miden_multisig_client::parse_account_address(input).map_err(|e| e.to_string())?;
-    if let Some(network_id) = network_id.filter(|network_id| network_id != expected_network) {
-        return Err(format!(
+/// Parses a `0x` hex or session-network bech32 (`mtst1...`) account id.
+pub(crate) fn parse_account_address(
+    input: &str,
+    expected_network: &NetworkId,
+) -> Result<AccountId, String> {
+    let input = input.trim();
+    let (account_id, network_id) = AccountId::parse(input).map_err(|e| {
+        format!("invalid account id '{input}': {e}; expected a bech32 address or 0x hex")
+    })?;
+    match network_id {
+        Some(network_id) if &network_id != expected_network => Err(format!(
             "address belongs to the {} network but the session is configured for {}",
             network_id.as_str(),
             expected_network.as_str()
-        ));
+        )),
+        _ => Ok(account_id),
     }
-    Ok(account_id)
 }
 
 fn prompt_p2id(
@@ -1301,7 +1302,7 @@ fn prompt_p2id(
                     "  [{}] {} tokens (faucet: {})",
                     i + 1,
                     fungible.amount(),
-                    shorten_hex(&fungible.faucet_id().to_hex())
+                    fungible.faucet_id().to_bech32(state.network_id())
                 );
                 fungible_assets.push((i + 1, fungible));
             }
@@ -1309,7 +1310,7 @@ fn prompt_p2id(
                 println!(
                     "  [{}] NFT (faucet: {}) - NOT SUPPORTED for P2ID",
                     i + 1,
-                    shorten_hex(&asset.faucet_id().to_hex())
+                    asset.faucet_id().to_bech32(state.network_id())
                 );
             }
         }
@@ -1337,7 +1338,7 @@ fn prompt_p2id(
     println!(
         "\nSelected: {} tokens from faucet {}",
         max_amount,
-        shorten_hex(&faucet_id.to_hex())
+        faucet_id.to_bech32(state.network_id())
     );
 
     // Get recipient
@@ -1383,8 +1384,8 @@ fn prompt_p2id(
     };
 
     println!("\nTransfer details:");
-    println!("  Recipient: {}", shorten_hex(recipient_input.trim()));
-    println!("  Faucet:    {}", shorten_hex(&faucet_id.to_hex()));
+    println!("  Recipient: {}", recipient.to_bech32(state.network_id()));
+    println!("  Faucet:    {}", faucet_id.to_bech32(state.network_id()));
     println!("  Amount:    {} / {} available", amount, max_amount);
     println!("  Note:      {}", note_type);
     if let Some(height) = heights.reclaim {
@@ -1471,13 +1472,13 @@ async fn prompt_consume_notes(
                         println!(
                             "      - {} tokens (faucet: {})",
                             f.amount(),
-                            shorten_hex(&f.faucet_id().to_hex())
+                            f.faucet_id().to_bech32(state.network_id())
                         );
                     }
                     None => {
                         println!(
                             "      - NFT (faucet: {})",
-                            shorten_hex(&asset.faucet_id().to_hex())
+                            asset.faucet_id().to_bech32(state.network_id())
                         );
                     }
                 }
@@ -1624,8 +1625,19 @@ fn prompt_update_procedure_threshold(
     ))
 }
 
+/// Leaves the imported proposal in the session.
+fn print_imported_proposal(state: &SessionState) -> Result<(), String> {
+    let proposal = state
+        .get_imported_proposal()
+        .ok_or_else(|| "No imported proposal".to_string())?;
+    print_proposal_details(proposal, state.network_id())
+}
+
 /// Print details of an exported proposal.
-fn print_proposal_details(proposal: &ExportedProposal) {
+fn print_proposal_details(
+    proposal: &ExportedProposal,
+    network_id: NetworkId,
+) -> Result<(), String> {
     let (collected, required) = proposal.signature_counts();
     let proposal_type = if proposal.metadata.proposal_type.is_empty() {
         "<unknown>"
@@ -1635,7 +1647,10 @@ fn print_proposal_details(proposal: &ExportedProposal) {
 
     println!("\nProposal Details:");
     println!("  ID:           {}", shorten_hex(&proposal.id));
-    println!("  Account:      {}", shorten_hex(&proposal.account_id));
+    println!(
+        "  Account:      {}",
+        account_address(&proposal.account_id, network_id)?
+    );
     println!("  Type:         {}", proposal_type);
     println!("  Nonce:        {}", proposal.nonce);
     println!("  Signatures:   {}/{}", collected, required);
@@ -1654,6 +1669,7 @@ fn print_proposal_details(proposal: &ExportedProposal) {
             println!("    - {}", shorten_hex(signer));
         }
     }
+    Ok(())
 }
 
 /// One line under a listed proposal when its summary-binding check failed:

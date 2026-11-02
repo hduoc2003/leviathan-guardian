@@ -423,7 +423,7 @@ impl ReleaseSweeper {
             Ok(outcome) => outcome,
             Err(e) => {
                 tracing::error!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     error = %e,
                     "Release sweep failed for account"
                 );
@@ -475,7 +475,7 @@ impl ReleaseSweeper {
             tracing::debug!(
                 event = "release_sweep_skipped",
                 reason = "pending_candidate",
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 "Candidate in flight; the push path owns this account for now"
             );
             return Ok(VisitOutcome::Checked);
@@ -516,7 +516,7 @@ impl ReleaseSweeper {
                 tracing::debug!(
                     event = "release_sweep_deferred",
                     reason = "chain_at_stored_base",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     "Chain at the stored base; guardian binding unchanged"
                 );
                 Ok(VisitOutcome::Checked)
@@ -527,7 +527,7 @@ impl ReleaseSweeper {
                 tracing::debug!(
                     event = "release_sweep_deferred",
                     reason = "not_on_chain",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     "Account not on chain yet; guardian binding unchanged"
                 );
                 Ok(VisitOutcome::Checked)
@@ -536,7 +536,7 @@ impl ReleaseSweeper {
                 tracing::info!(
                     event = "release_sweep_deferred",
                     reason = "chain_probe_unavailable",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     error = %e,
                     "Chain probe unavailable; deferring release check"
                 );
@@ -600,7 +600,7 @@ impl ReleaseSweeper {
             if let Some(delta_nonce) = self.promoting_delta_nonce(metadata, stored).await? {
                 tracing::info!(
                     event = "release_sweep_unwritten_push_release",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     delta_nonce,
                     stored_commitment = %stored.commitment,
                     new_guardian_commitment = %guardian,
@@ -707,7 +707,7 @@ impl ReleaseSweeper {
     fn report_own_key_mismatch(&self, account_id: &str, guardian: &str, own_commitment: &str) {
         tracing::warn!(
             event = "release_sweep_own_key_mismatch",
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             guardian_commitment = %guardian,
             own_guardian_commitment = %own_commitment,
             "Account is bound to a guardian key this server does not hold, and no switch \
@@ -801,7 +801,7 @@ impl ReleaseSweeper {
                 tracing::info!(
                     event = "release_sweep_deferred",
                     reason = "binding_read_unavailable",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     on_chain = %on_chain,
                     error = %e,
                     "Chain moved past the stored base but the guardian binding \
@@ -820,7 +820,7 @@ impl ReleaseSweeper {
                 tracing::info!(
                     event = "release_sweep_deferred",
                     reason = "storage_opaque",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     stored_commitment = %stored.commitment,
                     on_chain = %on_chain,
                     "Chain state differs from the stored one, no pending proposal or \
@@ -847,7 +847,7 @@ impl ReleaseSweeper {
             tracing::debug!(
                 event = "release_sweep_deferred",
                 reason = "chain_at_stored_base",
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 "Storage read shows the chain at the stored base; probe reads disagreed"
             );
             return Ok(VisitOutcome::Checked);
@@ -869,7 +869,7 @@ impl ReleaseSweeper {
             tracing::info!(
                 event = "release_sweep_deferred",
                 reason = "chain_behind_stored",
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 on_chain_nonce,
                 stored_nonce,
                 block_num,
@@ -893,7 +893,7 @@ impl ReleaseSweeper {
                 tracing::info!(
                     event = "release_sweep_deferred",
                     reason = "no_guardian_binding",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     on_chain = %on_chain_commitment,
                     "Published storage carries no guardian binding; absence is not a switch"
                 );
@@ -912,7 +912,7 @@ impl ReleaseSweeper {
                 tracing::info!(
                     event = "release_sweep_deferred",
                     reason = "guardian_still_bound",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     stored_commitment = %stored.commitment,
                     on_chain = %on_chain_commitment,
                     "Chain moved past the stored base but the account is still \
@@ -947,7 +947,7 @@ impl ReleaseSweeper {
         };
         tracing::info!(
             event = "release_sweep_confirming",
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             new_guardian_commitment = %new_guardian_commitment,
             observations,
             confirmations = self.confirmations,
@@ -1141,7 +1141,7 @@ impl ReleaseSweeper {
                     tracing::info!(
                         event = "release_sweep_deferred",
                         reason = "history_read_unavailable",
-                        account_id = %account_id,
+                        account_id = %crate::account_address::display(account_id),
                         candidate = %key,
                         error = %e,
                         "Transaction history could not be searched for a candidate's \
@@ -1181,7 +1181,7 @@ impl ReleaseSweeper {
             },
             Err(e) => {
                 tracing::info!(
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     candidate = %key,
                     error = %GuardianError::from(e),
                     "Candidate does not apply to the stored base; it cannot serve as \
@@ -1229,7 +1229,7 @@ impl ReleaseSweeper {
                 tracing::info!(
                     event = "release_sweep_deferred",
                     reason = "guardian_still_bound",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     candidate = %executed.source.key(),
                     on_chain = %on_chain,
                     "A candidate executed but its post-state keeps this server's guardian key"
@@ -1242,7 +1242,7 @@ impl ReleaseSweeper {
                 tracing::info!(
                     event = "release_sweep_deferred",
                     reason = "no_guardian_binding",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     candidate = %executed.source.key(),
                     on_chain = %on_chain,
                     "A candidate executed but its post-state carries no guardian binding; \
@@ -1311,7 +1311,7 @@ impl ReleaseSweeper {
                 self.sweep.forget_account(account_id);
                 tracing::info!(
                     event = "release_sweep_released",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     detected_by,
                     new_guardian_commitment = %new_guardian_commitment,
                     "Released an account whose guardian switch the push path did not release"
@@ -1324,7 +1324,7 @@ impl ReleaseSweeper {
                 tracing::info!(
                     event = "release_sweep_deferred",
                     reason = "stored_base_moved",
-                    account_id = %account_id,
+                    account_id = %crate::account_address::display(account_id),
                     detected_by,
                     "Stored state was replaced (a /configure or a promoted delta) before the \
                      release was written; re-evaluating from the new base next visit"
@@ -1357,12 +1357,12 @@ impl ReleaseSweeper {
         {
             Ok(()) => tracing::info!(
                 event = "release_sweep_proposal_finalized",
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 proposal_id = %proposal_id,
                 "Resolved the pending proposal the chain proved executed"
             ),
             Err(e) => tracing::warn!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(account_id),
                 proposal_id = %proposal_id,
                 error = %e,
                 "Failed to delete the executed proposal; it stays pending"

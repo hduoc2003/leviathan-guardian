@@ -186,7 +186,7 @@ pub async fn abandon_candidate(
         Ok(StateVerification::Mismatch { .. }) | Ok(StateVerification::Absent) => {}
         Err(e) => {
             tracing::warn!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(&account_id),
                 nonce,
                 error = %e,
                 "Could not verify on-chain state before abandon; recording \
@@ -207,7 +207,7 @@ pub async fn abandon_candidate(
     match intent {
         AbandonIntent::Recorded => {
             info!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(&account_id),
                 nonce,
                 "Abandon requested; worker resolves after the quarantine"
             );

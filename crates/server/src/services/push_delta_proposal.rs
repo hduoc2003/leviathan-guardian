@@ -34,7 +34,7 @@ pub struct PushDeltaProposalResult {
     level = "info",
     skip(state, params),
     fields(
-        account_id = %params.account_id,
+        account_id = %crate::account_address::display(&params.account_id),
         nonce = params.nonce,
         proposer_id = tracing::field::Empty,
         commitment = tracing::field::Empty,
@@ -92,7 +92,7 @@ pub async fn push_delta_proposal(
         .await
         .map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(&account_id),
                 error = %e,
                 "Failed to check pending candidate in push_delta_proposal"
             );
@@ -109,7 +109,7 @@ pub async fn push_delta_proposal(
         .await
         .map_err(|e| {
             tracing::error!(
-                account_id = %account_id,
+                account_id = %crate::account_address::display(&account_id),
                 error = %e,
                 "Failed to load pending proposals in push_delta_proposal"
             );

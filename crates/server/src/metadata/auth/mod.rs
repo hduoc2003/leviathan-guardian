@@ -180,7 +180,7 @@ impl Auth {
                 let (_pubkey, signature, timestamp) =
                     credentials.as_signature().ok_or_else(|| {
                         tracing::error!(
-                            account_id = %account_id,
+                            account_id = %crate::account_address::display(account_id),
                             "MidenFalconRpo requires signature credentials but got different type"
                         );
                         "MidenFalconRpo requires signature credentials".to_string()
@@ -200,7 +200,7 @@ impl Auth {
                 let (pubkey, signature, timestamp) =
                     credentials.as_signature().ok_or_else(|| {
                         tracing::error!(
-                            account_id = %account_id,
+                            account_id = %crate::account_address::display(account_id),
                             "MidenEcdsa requires signature credentials but got different type"
                         );
                         "MidenEcdsa requires signature credentials".to_string()

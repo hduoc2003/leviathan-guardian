@@ -37,6 +37,7 @@ async fn main() {
 
     let network_type =
         NetworkType::from_env("GUARDIAN_NETWORK_TYPE").expect("Failed to resolve network type");
+    server::account_address::init_log_network(network_type);
 
     let stage = Stage::from_env().expect("Invalid GUARDIAN_ENV");
 

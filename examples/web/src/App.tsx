@@ -25,6 +25,7 @@ import {
 } from '@/components';
 
 import { normalizeCommitment } from '@/lib/helpers';
+import { parseAccountInput } from '@/lib/accountAddress';
 import { classifyWalletError, formatError } from '@/lib/errors';
 import { clearMidenDatabase, createMidenClient, initializeSigner as initSigner } from '@/lib/initClient';
 import {
@@ -509,15 +510,11 @@ export default function App() {
       return;
     }
 
-    let normalizedId = accountId;
-    if (!normalizedId.startsWith('0x')) {
-      normalizedId = `0x${normalizedId}`;
-    }
-
     setLoadingAccount(true);
     setError(null);
     setDetectedConfig(null);
     try {
+      const normalizedId = parseAccountInput(accountId);
       const signerContext = resolveSignerContext(walletSource, signatureScheme);
       const ms = await loadMultisigAccount(
         multisigClient,
@@ -707,7 +704,7 @@ export default function App() {
     if (!multisig) return;
 
     await runProposalCreation(
-      () => createP2idProposal(multisig, recipientId, faucetId, amount),
+      () => createP2idProposal(multisig, parseAccountInput(recipientId), faucetId, amount),
       'Send payment proposal created',
     );
   };

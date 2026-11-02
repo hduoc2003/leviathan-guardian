@@ -1,3 +1,4 @@
+use crate::account_address;
 use crate::delta_object::{DeltaObject, ProposalSignature};
 use crate::metadata::NetworkConfig;
 use crate::metadata::auth::{Auth, Credentials, ExtractCredentials};
@@ -56,7 +57,10 @@ impl Guardian for GuardianService {
             .map_err(|e| Status::invalid_argument(format!("Invalid initial_state JSON: {e}")))?;
 
         let params = ConfigureAccountParams {
-            account_id: req.account_id.clone(),
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                req.account_id.clone(),
+            )?,
             auth,
             network_config,
             initial_state,
@@ -67,7 +71,13 @@ impl Guardian for GuardianService {
         match services::configure_account(&self.app_state, params).await {
             Ok(response) => Ok(Response::new(ConfigureResponse {
                 success: true,
-                message: format!("Account '{}' configured successfully", response.account_id),
+                message: format!(
+                    "Account '{}' configured successfully",
+                    account_address::display_on(
+                        self.app_state.dashboard.network_type(),
+                        &response.account_id
+                    )
+                ),
                 ack_pubkey: response.ack_pubkey,
                 ack_commitment: response.ack_commitment,
                 error_code: String::new(),
@@ -89,7 +99,10 @@ impl Guardian for GuardianService {
             .map_err(|e| Status::invalid_argument(format!("Invalid delta_payload JSON: {e}")))?;
 
         let delta = DeltaObject {
-            account_id: req.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                req.account_id,
+            )?,
             nonce: req.nonce,
             prev_commitment: req.prev_commitment,
             new_commitment: None,
@@ -129,7 +142,10 @@ impl Guardian for GuardianService {
         let req = request.into_inner();
 
         let params = GetDeltaParams {
-            account_id: req.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                req.account_id,
+            )?,
             nonce: req.nonce,
             credentials: auth,
         };
@@ -155,7 +171,10 @@ impl Guardian for GuardianService {
         let req = request.into_inner();
 
         let params = services::GetDeltaSinceParams {
-            account_id: req.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                req.account_id,
+            )?,
             from_nonce: req.from_nonce,
             credentials: auth,
         };
@@ -189,7 +208,10 @@ impl Guardian for GuardianService {
         .map_err(Status::from)?;
 
         let params = GetDeltaHistoryParams {
-            account_id: req.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                req.account_id,
+            )?,
             limit,
             cursor,
             credentials: auth,
@@ -217,7 +239,10 @@ impl Guardian for GuardianService {
         let req = request.into_inner();
 
         let params = GetStateParams {
-            account_id: req.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                req.account_id,
+            )?,
             credentials: auth,
         };
 
@@ -242,7 +267,10 @@ impl Guardian for GuardianService {
         let req = request.into_inner();
 
         let params = GetCanonicalNonceParams {
-            account_id: req.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                req.account_id,
+            )?,
             credentials: auth,
         };
 
@@ -288,7 +316,10 @@ impl Guardian for GuardianService {
         let data = request.into_inner();
 
         let params = services::PushDeltaProposalParams {
-            account_id: data.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                data.account_id,
+            )?,
             nonce: data.nonce,
             delta_payload: serde_json::from_str(&data.delta_payload)
                 .map_err(|e| Status::invalid_argument(format!("Invalid delta payload: {e}")))?,
@@ -315,7 +346,10 @@ impl Guardian for GuardianService {
         let data = request.into_inner();
 
         let params = services::GetDeltaProposalsParams {
-            account_id: data.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                data.account_id,
+            )?,
             credentials,
         };
 
@@ -338,7 +372,10 @@ impl Guardian for GuardianService {
         let data = request.into_inner();
 
         let params = GetDeltaProposalParams {
-            account_id: data.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                data.account_id,
+            )?,
             commitment: data.commitment,
             credentials,
         };
@@ -366,7 +403,10 @@ impl Guardian for GuardianService {
             .ok_or_else(|| Status::invalid_argument("Missing signature payload"))?;
 
         let params = services::SignDeltaProposalParams {
-            account_id: data.account_id,
+            account_id: account_address::parse_input(
+                self.app_state.dashboard.network_type(),
+                data.account_id,
+            )?,
             commitment: data.commitment,
             signature: proto_signature_to_internal(signature)?,
             credentials,
@@ -392,9 +432,11 @@ impl Guardian for GuardianService {
     ) -> Result<Response<AbandonDeltaCandidateResponse>, Status> {
         let credentials = authenticated_request(&request)?;
         let data = request.into_inner();
+        let account_id =
+            account_address::parse_input(self.app_state.dashboard.network_type(), data.account_id)?;
 
         let params = services::AbandonCandidateParams {
-            account_id: data.account_id.clone(),
+            account_id: account_id.clone(),
             nonce: data.nonce,
             credentials,
         };
@@ -412,7 +454,7 @@ impl Guardian for GuardianService {
             Err(e) => Ok(Response::new(AbandonDeltaCandidateResponse {
                 success: false,
                 message: e.to_string(),
-                account_id: data.account_id,
+                account_id,
                 nonce: data.nonce,
                 state: String::new(),
                 abandon_requested_at: String::new(),

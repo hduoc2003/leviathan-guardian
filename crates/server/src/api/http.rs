@@ -1,3 +1,4 @@
+use crate::account_address;
 use crate::delta_object::DeltaObject;
 use crate::error::GuardianError;
 use crate::metadata::NetworkConfig;
@@ -182,12 +183,19 @@ pub async fn configure(
         request_payload_from_serializable(&payload).map_err(GuardianError::InvalidInput)?;
 
     let mut params = ConfigureAccountParams::from(payload);
+    params.account_id = account_address::parse_input(
+        state.dashboard.network_type(),
+        std::mem::take(&mut params.account_id),
+    )?;
     params.credential = request_payload.apply_to(credentials);
 
     let response = services::configure_account(&state, params).await?;
     Ok(Json(ConfigureResponse {
         success: true,
-        message: format!("Account '{}' configured successfully", response.account_id),
+        message: format!(
+            "Account '{}' configured successfully",
+            account_address::display_on(state.dashboard.network_type(), &response.account_id)
+        ),
         ack_pubkey: Some(response.ack_pubkey),
         ack_commitment: Some(response.ack_commitment),
         code: None,
@@ -218,8 +226,12 @@ pub async fn push_delta(
     let request_payload =
         request_payload_from_value(&payload).map_err(GuardianError::InvalidInput)?;
 
-    let delta: DeltaObject = serde_json::from_value(payload)
+    let mut delta: DeltaObject = serde_json::from_value(payload)
         .map_err(|e| GuardianError::InvalidInput(format!("Invalid delta payload: {e}")))?;
+    delta.account_id = account_address::parse_input(
+        state.dashboard.network_type(),
+        std::mem::take(&mut delta.account_id),
+    )?;
 
     let params = PushDeltaParams {
         delta,
@@ -252,7 +264,7 @@ pub async fn get_delta(
         request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetDeltaParams {
-        account_id: query.account_id,
+        account_id: account_address::parse_input(state.dashboard.network_type(), query.account_id)?,
         nonce: query.nonce,
         credentials: request_payload.apply_to(credentials),
     };
@@ -284,7 +296,7 @@ pub async fn get_delta_since(
         request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetDeltaSinceParams {
-        account_id: query.account_id,
+        account_id: account_address::parse_input(state.dashboard.network_type(), query.account_id)?,
         from_nonce: query.nonce,
         credentials: request_payload.apply_to(credentials),
     };
@@ -325,7 +337,7 @@ pub async fn get_delta_history(
     )?;
 
     let params = GetDeltaHistoryParams {
-        account_id: query.account_id,
+        account_id: account_address::parse_input(state.dashboard.network_type(), query.account_id)?,
         limit,
         cursor,
         credentials: request_payload.apply_to(credentials),
@@ -357,7 +369,7 @@ pub async fn get_state(
         request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetStateParams {
-        account_id: query.account_id,
+        account_id: account_address::parse_input(state.dashboard.network_type(), query.account_id)?,
         credentials: request_payload.apply_to(credentials),
     };
 
@@ -394,7 +406,7 @@ pub async fn get_canonical_nonce(
         request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetCanonicalNonceParams {
-        account_id: query.account_id,
+        account_id: account_address::parse_input(state.dashboard.network_type(), query.account_id)?,
         credentials: request_payload.apply_to(credentials),
     };
 
@@ -548,7 +560,10 @@ pub async fn push_delta_proposal(
         request_payload_from_serializable(&payload).map_err(GuardianError::InvalidInput)?;
 
     let params = PushDeltaProposalParams {
-        account_id: payload.account_id,
+        account_id: account_address::parse_input(
+            state.dashboard.network_type(),
+            payload.account_id,
+        )?,
         nonce: payload.nonce,
         delta_payload: payload.delta_payload,
         credentials: request_payload.apply_to(credentials),
@@ -601,7 +616,10 @@ pub async fn abandon_candidate(
         request_payload_from_serializable(&payload).map_err(GuardianError::InvalidInput)?;
 
     let params = AbandonCandidateParams {
-        account_id: payload.account_id,
+        account_id: account_address::parse_input(
+            state.dashboard.network_type(),
+            payload.account_id,
+        )?,
         nonce: payload.nonce,
         credentials: request_payload.apply_to(credentials),
     };
@@ -639,7 +657,7 @@ pub async fn get_delta_proposals(
         request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetDeltaProposalsParams {
-        account_id: query.account_id,
+        account_id: account_address::parse_input(state.dashboard.network_type(), query.account_id)?,
         credentials: request_payload.apply_to(credentials),
     };
 
@@ -671,7 +689,7 @@ pub async fn get_delta_proposal(
         request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetDeltaProposalParams {
-        account_id: query.account_id,
+        account_id: account_address::parse_input(state.dashboard.network_type(), query.account_id)?,
         commitment: query.commitment,
         credentials: request_payload.apply_to(credentials),
     };
@@ -706,7 +724,10 @@ pub async fn sign_delta_proposal(
         request_payload_from_serializable(&payload).map_err(GuardianError::InvalidInput)?;
 
     let params = SignDeltaProposalParams {
-        account_id: payload.account_id,
+        account_id: account_address::parse_input(
+            state.dashboard.network_type(),
+            payload.account_id,
+        )?,
         commitment: payload.commitment,
         signature: payload.signature,
         credentials: request_payload.apply_to(credentials),
@@ -1499,6 +1520,56 @@ mod tests {
             .expect("get_state should succeed");
 
         assert_eq!(response.account_id, account_id);
+    }
+
+    #[tokio::test]
+    async fn get_state_accepts_the_bech32_address_of_the_server_network() {
+        use miden_protocol::account::AccountId;
+        use miden_protocol::address::NetworkId;
+
+        let (state, storage, _network, metadata) = create_test_state();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
+        let network_id = crate::metadata::MidenNetworkType::from(state.dashboard.network_type())
+            .to_miden_network_id();
+        let address = AccountId::from_hex(&account_id)
+            .unwrap()
+            .to_bech32(network_id.clone());
+        let signer = TestSigner::new();
+        let account_json: serde_json::Value = serde_json::from_str(fixtures::ACCOUNT_JSON).unwrap();
+        let _metadata = metadata.with_get(Ok(Some(create_account_metadata(
+            account_id.clone(),
+            vec![signer.commitment_hex.clone()],
+        ))));
+        let _storage = storage.with_pull_state(Ok(create_state_object(
+            account_id.clone(),
+            "0x123".to_string(),
+            account_json,
+        )));
+
+        let query = StateQuery {
+            account_id: address,
+        };
+        let credentials = signed_credentials(&signer, &account_id, &query);
+        let Json(response) = get_state(State(state.clone()), AuthHeader(credentials), Query(query))
+            .await
+            .expect("get_state should accept the bech32 address");
+        assert_eq!(response.account_id, account_id);
+
+        let other_network = if network_id == NetworkId::Devnet {
+            NetworkId::Testnet
+        } else {
+            NetworkId::Devnet
+        };
+        let query = StateQuery {
+            account_id: AccountId::from_hex(&account_id)
+                .unwrap()
+                .to_bech32(other_network),
+        };
+        let credentials = signed_credentials(&signer, &account_id, &query);
+        let err = get_state(State(state), AuthHeader(credentials), Query(query))
+            .await
+            .expect_err("a bech32 address of another network must be rejected");
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ use crate::state::SessionState;
 pub async fn action_list_notes(state: &mut SessionState) -> Result<(), String> {
     print_section("Notes");
 
+    let network_id = state.network_id();
     let client = state.get_client_mut()?;
 
     // Fetch notes with their status for detailed information
@@ -42,7 +43,7 @@ pub async fn action_list_notes(state: &mut SessionState) -> Result<(), String> {
             println!(
                 "      Status: {} for {}{}",
                 status,
-                shorten_hex(&account_id.to_hex()),
+                account_id.to_bech32(network_id.clone()),
                 marker
             );
 
@@ -63,13 +64,13 @@ pub async fn action_list_notes(state: &mut SessionState) -> Result<(), String> {
                         println!(
                             "        - {} tokens (faucet: {})",
                             fungible.amount(),
-                            shorten_hex(&fungible.faucet_id().to_hex())
+                            fungible.faucet_id().to_bech32(network_id.clone())
                         );
                     }
                     None => {
                         println!(
                             "        - NFT (faucet: {})",
-                            shorten_hex(&asset.faucet_id().to_hex())
+                            asset.faucet_id().to_bech32(network_id.clone())
                         );
                     }
                 }

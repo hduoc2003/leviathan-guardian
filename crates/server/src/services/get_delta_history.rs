@@ -121,7 +121,7 @@ impl HistoryEntry {
 ///     loaded.
 #[tracing::instrument(
     skip(state, params),
-    fields(account_id = %params.account_id, limit = params.limit)
+    fields(account_id = %crate::account_address::display(&params.account_id), limit = params.limit)
 )]
 pub async fn get_delta_history(
     state: &AppState,
@@ -157,13 +157,13 @@ pub async fn get_delta_history(
         .await
         .map_err(|e| {
             tracing::warn!(
-                account_id = %params.account_id,
+                account_id = %crate::account_address::display(&params.account_id),
                 error = %e,
                 "history feed could not load canonical deltas"
             );
             GuardianError::StorageError(format!(
                 "Failed to load history for '{}': {e}",
-                params.account_id
+                crate::account_address::display(&params.account_id)
             ))
         })?;
 

@@ -18,7 +18,7 @@ pub struct GetStateResult {
 #[tracing::instrument(
     level = "info",
     skip(state, params),
-    fields(account_id = %params.account_id)
+    fields(account_id = %crate::account_address::display(&params.account_id))
 )]
 pub async fn get_state(state: &AppState, params: GetStateParams) -> Result<GetStateResult> {
     tracing::debug!("Getting state");

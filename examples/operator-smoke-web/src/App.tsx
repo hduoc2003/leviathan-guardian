@@ -205,6 +205,10 @@ export default function App() {
   const [pauseReason, setPauseReason] = useState('smoke-test');
   const [pagedLimit, setPagedLimit] = useState('2');
   const [pagedAccounts, setPagedAccounts] = useState<DashboardAccountSummary[]>([]);
+  // The server only exposes bech32 on account summaries, so ids not listed yet show as hex.
+  const accountAddress = (accountId: string): string =>
+    [...accounts, ...pagedAccounts].find((entry) => entry.accountId === accountId)
+      ?.accountIdBech32 ?? accountId;
   const [pagedCursor, setPagedCursor] = useState<string | null>(null);
   const [pagedPageCount, setPagedPageCount] = useState(0);
   const [globalDeltaStatusFilter, setGlobalDeltaStatusFilter] = useState<{
@@ -725,11 +729,11 @@ export default function App() {
           </div>
 
           <label>
-            <span>Account ID</span>
+            <span>Account address</span>
             <input
               value={accountId}
               onChange={(event) => setAccountId(event.target.value)}
-              placeholder="0x..."
+              placeholder="bech32 address or 0x hex"
             />
           </label>
           <div className="actions">
@@ -766,19 +770,13 @@ export default function App() {
               {accounts.map((entry) => (
                 <article className="account-card" key={entry.accountId}>
                   <div className="account-card-header">
-                    <code>{entry.accountId}</code>
+                    <code>{entry.accountIdBech32 ?? entry.accountId}</code>
                     <span
                       className={`badge ${entry.stateStatus === 'available' ? 'success' : 'warning'}`}
                     >
                       {entry.stateStatus}
                     </span>
                   </div>
-                  {entry.accountIdBech32 ? (
-                    <div className="account-card-bech32">
-                      <span className="label">bech32</span>
-                      <code>{entry.accountIdBech32}</code>
-                    </div>
-                  ) : null}
                   <div className="status-grid compact">
                     <div>
                       <span className="label">Scheme</span>
@@ -899,7 +897,7 @@ export default function App() {
                         <div>
                           <span className="label">Account</span>
                           <strong>
-                            <code>{globalAccountId}</code>
+                            <code>{accountAddress(globalAccountId)}</code>
                           </strong>
                         </div>
                       ) : null}
@@ -1001,7 +999,7 @@ export default function App() {
               className={`badge ${deltaDetail ? 'success' : 'neutral'}`}
             >
               {deltaDetail
-                ? `${deltaDetail.accountId} · nonce ${deltaDetail.nonce}`
+                ? `${accountAddress(deltaDetail.accountId)} · nonce ${deltaDetail.nonce}`
                 : 'not loaded'}
             </span>
           </div>
@@ -1022,7 +1020,7 @@ export default function App() {
                 <div>
                   <span className="label">Account</span>
                   <strong>
-                    <code>{deltaDetail.accountId}</code>
+                    <code>{accountAddress(deltaDetail.accountId)}</code>
                   </strong>
                 </div>
                 <div>
@@ -1252,7 +1250,7 @@ export default function App() {
                 <article className="account-card" key={`${entry.accountId}-${index}`}>
                   <div className="account-card-header">
                     <code>
-                      #{index + 1} · {entry.accountId}
+                      #{index + 1} · {entry.accountIdBech32 ?? entry.accountId}
                     </code>
                     <span
                       className={`badge ${entry.stateStatus === 'available' ? 'success' : 'warning'}`}

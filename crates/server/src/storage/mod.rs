@@ -417,7 +417,7 @@ pub(crate) async fn discard_candidate_sequential(
         .await
     {
         tracing::warn!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             error = %e,
             "Failed to clear has_pending_candidate flag after discard"
         );
@@ -569,7 +569,7 @@ pub trait StorageBackend: Send + Sync {
                 }
                 Err(e) if is_storage_not_found(&e) => {
                     tracing::debug!(
-                        account_id = %id,
+                        account_id = %crate::account_address::display(id),
                         "pull_states_batch: no state row; treating as missing-state at dashboard layer",
                     );
                 }

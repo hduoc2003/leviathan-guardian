@@ -35,7 +35,7 @@ pub fn verify_request_signature(
     // Check if this commitment is in the authorized list
     if !authorized_commitments.contains(&sig_commitment_hex) {
         tracing::error!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             sig_commitment = %sig_commitment_hex,
             authorized_count = authorized_commitments.len(),
             "Signature verification failed: public key commitment not authorized"
@@ -51,7 +51,7 @@ pub fn verify_request_signature(
         Ok(sig_commitment_hex)
     } else {
         tracing::error!(
-            account_id = %account_id,
+            account_id = %crate::account_address::display(account_id),
             timestamp = %timestamp,
             sig_commitment = %sig_commitment_hex,
             "Signature verification failed: invalid signature"
@@ -78,7 +78,7 @@ pub fn account_id_timestamp_to_digest(
         .map(|request| request.to_word())
         .map_err(|e| {
             tracing::error!(
-                account_id = %account_id_hex,
+                account_id = %crate::account_address::display(account_id_hex),
                 error = %e,
                 "Invalid account ID hex in account_id_timestamp_to_digest"
             );
